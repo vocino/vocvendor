@@ -1,11 +1,15 @@
--- VocVendor: vendor automation. Sells junk, repairs gear, and offers one
--- smart button (Sell Old Gear) on the merchant frame. Never sells old
--- gear automatically: the button shows a dry-run list first.
+-- VocVendor: vendor automation built around one idea: junk is a
+-- configurable definition, not a fixed pile of grays. The definition
+-- drives both triggers: auto-sell on every vendor visit, and the
+-- merchant frame's own Sell Junk button (which we enhance, not
+-- replace).
 --
 -- Sources of truth (verified against the live 12.x client, see AGENTS.md):
 --   C_MerchantFrame.SellAllJunkItems / GetNumJunkItems -- Blizzard's own
---     junk sale (the merchant frame's built-in Sell All Junk button calls
---     the same API; we just automate it).
+--     junk sale; the native Sell Junk button calls the same API.
+--   MerchantSellAllJunkButton (MerchantFrame.xml) calls
+--     MerchantFrame_OnSellAllJunkButtonClicked on click; its enabled
+--     state is refreshed inside MerchantFrame_Update.
 --   RepairAllItems(useGuildBank), CanMerchantRepair, CanGuildBankRepair,
 --     GetRepairAllCost -> (cost, canRepair) -- Blizzard's own repair flow
 --     (MerchantFrame.xml guild-bank repair button).
@@ -28,14 +32,19 @@ function ns.say(msg)
   print("|c" .. ns.PREFIX_COLOR .. name .. "|r: " .. tostring(msg))
 end
 
+-- The junk definition. Grays are always junk (Blizzard's own baseline,
+-- and what the native button's tooltip promises). Old gear joins the
+-- definition only when the player opts in: then it sells automatically
+-- AND on the Sell Junk button, so the default stays safe.
 local defaults = {
   autoSell = true,        -- sell junk on every vendor visit
   autoRepair = true,      -- repair on every vendor visit
   guildRepair = true,     -- guild funds first, own gold as fallback
   announce = true,        -- chat line for sells and repairs
-  oldGearIlvlGap = 30,    -- sell gear this far below equipped
-  oldGearBoE = false,     -- include Bind on Equip in Sell Old Gear
-  oldGearWarbound = false,-- include Warbound in Sell Old Gear
+  junkOldGear = false,    -- old gear counts as junk
+  oldGearIlvlGap = 30,    -- ...when this far below equipped
+  oldGearBoE = false,     -- include Bind on Equip in old gear
+  oldGearWarbound = false,-- include Warbound in old gear
 }
 
 VocVendorDB = VocVendorDB or {}
@@ -60,23 +69,75 @@ function ns.moneyString(copper)
   return string.format("%dc", c)
 end
 
--- Junk sale. Uses Blizzard's own junk definition and sale API: the
--- merchant frame's built-in Sell All Junk button calls
--- C_MerchantFrame.SellAllJunkItems(); we call the same thing
--- automatically. Presence-gated so a client without it simply skips.
-function ns.sellJunk()
-  if type(C_MerchantFrame) ~= "table" then return end
-  if type(C_MerchantFrame.GetNumJunkItems) ~= "function" then return end
-  if type(C_MerchantFrame.SellAllJunkItems) ~= "function" then return end
-  local ok, n = pcall(C_MerchantFrame.GetNumJunkItems)
-  if not ok or type(n) ~= "number" or n == 0 then return end
+-- The configured junk right now: gray count (Blizzard's definition) plus
+-- the old-gear list when the player opted it into the definition.
+function ns.collectJunk()
+  local grayCount = 0
+  if type(C_MerchantFrame) == "table"
+    and type(C_MerchantFrame.GetNumJunkItems) == "function" then
+    local ok, n = pcall(C_MerchantFrame.GetNumJunkItems)
+    if ok and type(n) == "number" then grayCount = n end
+  end
+  local oldGear = {}
+  if ns.opts().junkOldGear then
+    oldGear = ns.collectOldGear()
+  end
+  return { grayCount = grayCount, oldGear = oldGear }
+end
+
+-- Sells the gray pile via Blizzard's own API. Returns copper earned.
+function ns.sellGrays()
+  if type(C_MerchantFrame) ~= "table" then return 0 end
+  if type(C_MerchantFrame.SellAllJunkItems) ~= "function" then return 0 end
   local before = GetMoney()
   pcall(C_MerchantFrame.SellAllJunkItems)
   local earned = GetMoney() - before
-  if earned < 0 then earned = 0 end
-  dbg("vocvendor", "sold_junk", "n=" .. n)
+  return earned > 0 and earned or 0
+end
+
+-- Sells a candidate list, re-verifying each slot first: bags shift
+-- between the dry-run and the click, and we never sell the wrong item.
+-- Quiet: the caller composes the announcement. Returns count and copper.
+function ns.sellOldGearItems(items)
+  local n, value = 0, 0
+  for _, it in ipairs(items or {}) do
+    if C_Container.GetContainerItemLink(it.bag, it.slot) == it.link then
+      local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
+      if ok then
+        n = n + 1
+        value = value + (it.price or 0)
+      end
+    end
+  end
+  return n, value
+end
+
+function ns.junkSummary(junk, earned, nOld)
+  local parts = {}
+  if junk.grayCount > 0 then
+    parts[#parts + 1] = junk.grayCount .. " junk"
+  end
+  if nOld > 0 then
+    parts[#parts + 1] = nOld .. " old gear"
+  end
+  if #parts == 0 then return nil end
+  return "sold " .. table.concat(parts, ", ") .. " for "
+    .. ns.moneyString(earned)
+end
+
+-- Auto path: sells the whole configured definition, no popup. The player
+-- opted into every part of it via settings.
+function ns.autoSell()
+  local junk = ns.collectJunk()
+  if junk.grayCount == 0 and #junk.oldGear == 0 then return end
+  local earned = 0
+  if junk.grayCount > 0 then earned = ns.sellGrays() end
+  local nOld, oldValue = ns.sellOldGearItems(junk.oldGear)
+  dbg("vocvendor", "auto_sell",
+    "gray=" .. junk.grayCount .. " old=" .. nOld)
   if ns.opts().announce then
-    ns.say("sold " .. n .. " junk for " .. ns.moneyString(earned))
+    local line = ns.junkSummary(junk, earned + oldValue, nOld)
+    if line then ns.say(line) end
   end
 end
 
@@ -117,12 +178,95 @@ function ns.repairNow()
 end
 
 function ns.onMerchantShow()
-  ns.ensureVendorButton()
+  ns.hookJunkButton()
   -- Sell first: junk gold pays for the repair that follows.
   local o = ns.opts()
-  if o.autoSell then ns.sellJunk() end
+  if o.autoSell then ns.autoSell() end
   if o.autoRepair then ns.repairNow() end
 end
+
+-- The native Sell Junk button, enhanced. We keep Blizzard's button,
+-- tooltip, and grays-only flow untouched; when the player's junk
+-- definition includes old gear, the click runs our dry-run first.
+-- Everything is presence-gated: on a client without the button (or
+-- without its API) we simply don't hook.
+ns.junkHooked = false
+ns.blizzJunkClick = nil
+
+function ns.hookJunkButton()
+  if ns.junkHooked then return end
+  if type(MerchantSellAllJunkButton) ~= "table" then return end
+  if type(MerchantSellAllJunkButton.GetScript) ~= "function" then return end
+  if type(MerchantSellAllJunkButton.SetScript) ~= "function" then return end
+  ns.blizzJunkClick = MerchantSellAllJunkButton:GetScript("OnClick")
+  MerchantSellAllJunkButton:SetScript("OnClick",
+    function(button) ns.onJunkButtonClick(button) end)
+  if type(hooksecurefunc) == "function" then
+    hooksecurefunc("MerchantFrame_Update", function() ns.refreshJunkButton() end)
+  end
+  ns.junkHooked = true
+end
+
+-- Blizzard enables the button on grays alone; re-enable when our
+-- definition has old gear but no grays. Runs after MerchantFrame_Update.
+function ns.refreshJunkButton()
+  if type(MerchantSellAllJunkButton) ~= "table" then return end
+  if type(MerchantSellAllJunkButton.IsShown) == "function"
+    and not MerchantSellAllJunkButton:IsShown() then
+    return
+  end
+  local junk = ns.collectJunk()
+  local has = junk.grayCount > 0 or #junk.oldGear > 0
+  if type(MerchantSellAllJunkButton.SetEnabled) == "function" then
+    MerchantSellAllJunkButton:SetEnabled(has)
+  end
+end
+
+-- Manual path (native button or /vv): same definition as auto-sell, but
+-- old gear goes through the itemized dry-run first. Grays alone keep
+-- Blizzard's original click and popup.
+function ns.onJunkButtonClick(button)
+  local junk = ns.collectJunk()
+  if #junk.oldGear == 0 then
+    if type(ns.blizzJunkClick) == "function" then
+      ns.blizzJunkClick(button)
+    end
+    return
+  end
+  local total = 0
+  for _, it in ipairs(junk.oldGear) do total = total + (it.price or 0) end
+  ns.say("junk to sell (" .. junk.grayCount .. " gray, "
+    .. #junk.oldGear .. " old gear):")
+  for _, it in ipairs(junk.oldGear) do print("  " .. it.link) end
+  StaticPopup_Show("VOCVENDOR_SELL_JUNK",
+    junk.grayCount + #junk.oldGear, ns.moneyString(total),
+    { grayCount = junk.grayCount, oldGear = junk.oldGear })
+end
+
+-- Confirm handler for the dry-run popup: sells the configured junk.
+function ns.sellJunkNow(data)
+  data = data or {}
+  local earned = 0
+  if (data.grayCount or 0) > 0 then earned = ns.sellGrays() end
+  local nOld, oldValue = ns.sellOldGearItems(data.oldGear)
+  dbg("vocvendor", "manual_sell",
+    "gray=" .. (data.grayCount or 0) .. " old=" .. nOld)
+  if ns.opts().announce then
+    local line = ns.junkSummary(
+      { grayCount = data.grayCount or 0 }, earned + oldValue, nOld)
+    if line then ns.say(line) end
+  end
+end
+
+StaticPopupDialogs["VOCVENDOR_SELL_JUNK"] = {
+  text = "Sell %d items for %s?",
+  button1 = "Sell",
+  button2 = "Cancel",
+  OnAccept = function(_, data) ns.sellJunkNow(data) end,
+  timeout = 0,
+  whileDead = true,
+  hideOnEscape = true,
+}
 
 -- Sell Old Gear: bag gear far below the equipped item level.
 -- Slot tables duplicated from VocGear (same client build, same source);
@@ -219,72 +363,6 @@ function ns.collectOldGear()
   return out
 end
 
--- The button never sells on its own: it prints the itemized dry-run to
--- chat (links stay clickable there) and asks for one confirmation.
-function ns.onSellOldGearClick()
-  local items = ns.collectOldGear()
-  if #items == 0 then
-    ns.say("no old gear to sell")
-    return
-  end
-  local total = 0
-  for _, it in ipairs(items) do total = total + (it.price or 0) end
-  ns.say("old gear to sell (" .. #items .. "):")
-  for _, it in ipairs(items) do print("  " .. it.link) end
-  StaticPopup_Show("VOCVENDOR_SELL_OLD_GEAR", #items,
-    ns.moneyString(total), { items = items })
-end
-
--- Re-verifies each slot before selling: bags shift between the dry-run
--- and the click, and we never sell the wrong item.
-function ns.sellOldGearNow(items)
-  local n = 0
-  for _, it in ipairs(items or {}) do
-    if C_Container.GetContainerItemLink(it.bag, it.slot) == it.link then
-      local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
-      if ok then n = n + 1 end
-    end
-  end
-  dbg("vocvendor", "sold_old_gear", "n=" .. n)
-  if ns.opts().announce and n > 0 then
-    ns.say("sold " .. n .. " old items")
-  end
-end
-
-StaticPopupDialogs["VOCVENDOR_SELL_OLD_GEAR"] = {
-  text = "Sell %d old items for %s?",
-  button1 = "Sell",
-  button2 = "Cancel",
-  OnAccept = function(_, data) ns.sellOldGearNow(data and data.items) end,
-  timeout = 0,
-  whileDead = true,
-  hideOnEscape = true,
-}
-
--- One button on the merchant frame, stock chrome. Blizzard already ships
--- the manual Sell All Junk button, so ours is only the smart one.
-ns.vendorButton = nil
-function ns.ensureVendorButton()
-  if ns.vendorButton then return end
-  if type(MerchantFrame) ~= "table" then return end
-  if type(CreateFrame) ~= "function" then return end
-  local b = CreateFrame("Button", nil, MerchantFrame, "UIPanelButtonTemplate")
-  b:SetSize(120, 22)
-  b:SetText("Sell Old Gear")
-  b:SetPoint("BOTTOMRIGHT", MerchantFrame, "BOTTOMRIGHT", -10, 10)
-  b:SetScript("OnClick", function() ns.onSellOldGearClick() end)
-  b:SetScript("OnEnter", function(self)
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:SetText("Sell Old Gear")
-    GameTooltip:AddLine(
-      "Sell bag gear far below your equipped item level, after review.",
-      1, 1, 1, true)
-    GameTooltip:Show()
-  end)
-  b:SetScript("OnLeave", function() GameTooltip:Hide() end)
-  ns.vendorButton = b
-end
-
 -- Settings
 ns.settingsBuilt = false
 function ns.onSettingChanged(setting, fn)
@@ -306,13 +384,15 @@ function ns.ensureSettings()
     Settings.CreateCheckbox(category, s, tooltip)
   end
   check("autoSell", "Auto-sell junk",
-    "Sell gray-quality junk automatically on every vendor visit.")
+    "Sell junk automatically on every vendor visit. Junk is what you configure below.")
   check("autoRepair", "Auto-repair",
     "Repair all gear automatically at vendors that repair.")
   check("guildRepair", "Guild funds first",
     "Pay repairs from the guild bank when possible, your own gold otherwise.")
   check("announce", "Chat announcements",
     "Print a line when VocVendor sells or repairs.")
+  check("junkOldGear", "Old gear counts as junk",
+    "Gear far below your equipped item level sells with junk, automatically and on the Sell Junk button. Off keeps it out of the definition.")
   do
     local s = Settings.RegisterAddOnSetting(
       category, "VocVendor_oldGearIlvlGap", "oldGearIlvlGap",
@@ -325,12 +405,12 @@ function ns.ensureSettings()
       sliderOpts:SetLabelFormatter(rightLabel)
     end
     Settings.CreateSlider(category, s, sliderOpts,
-      "Sell Old Gear only lists gear this far below your equipped item level.")
+      "Gear this far below your equipped item level counts as old gear.")
   end
   check("oldGearBoE", "Also sell Bind on Equip",
-    "Include BoE gear in Sell Old Gear. Off keeps it safe: BoE can sell well on the auction house.")
+    "Include BoE gear in old gear. Off keeps it safe: BoE can sell well on the auction house.")
   check("oldGearWarbound", "Also sell Warbound",
-    "Include Warbound gear in Sell Old Gear. Off keeps it safe: alts can use it through the warbank.")
+    "Include Warbound gear in old gear. Off keeps it safe: alts can use it through the warbank.")
   ns.settingsBuilt = true
   ns.settingsCategory = category
 end
@@ -340,8 +420,8 @@ function ns.openConfig()
   if not ok then ns.say("open Settings > AddOns > VocVendor") end
 end
 
--- Slash. Bare command sells junk now (the manual trigger); on/off flips
--- auto-sell.
+-- Slash. Bare command runs the manual junk sale (same as clicking the
+-- native Sell Junk button); on/off flips auto-sell.
 ns.HELP = {
   "/vv -- sell junk now",
   "/vv on|off -- auto-sell junk on vendor visits",
@@ -363,7 +443,7 @@ SlashCmdList.VOCVENDOR = function(msg)
       ns.say("open a vendor first")
       return
     end
-    ns.sellJunk()
+    ns.onJunkButtonClick(MerchantSellAllJunkButton)
   elseif msg == "on" or msg == "off" then
     o.autoSell = (msg == "on")
     ns.say("auto-sell junk " .. (o.autoSell and "on" or "off"))

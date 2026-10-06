@@ -77,6 +77,16 @@ local function loadAddon(world)
   g.MerchantFrame = {
     IsShown = function() return world.merchantOpen end,
   }
+  world.blizzClick = function() world.blizzClicked = true end
+  g.MerchantSellAllJunkButton = {
+    IsShown = function() return true end,
+    GetScript = function(_, n)
+      if n == "OnClick" then return world.blizzClick end
+    end,
+    SetScript = function(_, n, fn) world.hookedClick[n] = fn end,
+    SetEnabled = function(_, e) world.buttonEnabled = e end,
+  }
+  g.hooksecurefunc = function(n, fn) world.hooks[n] = fn end
   g.CreateFrame = function(ftype)
     local f = { events = {}, scripts = {}, ctype = ftype }
     f.RegisterEvent = function(_, e) f.events[e] = true end
@@ -158,6 +168,7 @@ local function newWorld()
     merchantOpen = true, withPawn = false, pawnUpgrades = {},
     settingsReg = {}, settingsChecks = 0, settingsSliders = 0,
     settingsCategory = nil, savedVars = nil,
+    blizzClicked = false, hookedClick = {}, hooks = {}, buttonEnabled = nil,
   }
 end
 
@@ -429,94 +440,162 @@ do
   check("non gear class rejected", ns.isOldGear(potion, 30) == false)
 end
 
--- 17. Sell Old Gear click with nothing: says so, no popup.
+-- 17. collectJunk: grays always; old gear only when opted in.
 do
   local w = newWorld()
   local ns = loadAddon(w)
   clientLoaded(w)
+  w.junkCount = 2
   w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
-  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 395 })) -- too new
-  ns.onSellOldGearClick()
-  check("empty says so", w.printed[1] == "|cff66ccffVocVendor|r: no old gear to sell")
-  check("empty no popup", #w.popups == 0)
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300 }))
+  local junk = ns.collectJunk()
+  check("grays counted", junk.grayCount == 2)
+  check("old gear excluded by default", #junk.oldGear == 0)
+  ns.opts().junkOldGear = true
+  junk = ns.collectJunk()
+  check("old gear included when opted in", #junk.oldGear == 1)
 end
 
--- 18. Sell Old Gear click: itemized dry-run in chat, one confirm popup.
+-- 18. Auto-sell with old gear in the definition: one combined sale.
+do
+  local w = newWorld()
+  w.junkCount = 2
+  w.junkValue = 450
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("grays sold", w.junkSold == true)
+  check("old gear sold", #w.sold == 1)
+  check("combined announce",
+    w.printed[1] == "|cff66ccffVocVendor|r: sold 2 junk, 1 old gear for 14s 50c")
+end
+
+-- 19. Native button hook: installs once, preserves Blizzard's click.
 do
   local w = newWorld()
   local ns = loadAddon(w)
   clientLoaded(w)
+  w.repairCan = false
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("hook installed", type(w.hookedClick.OnClick) == "function")
+  check("original preserved", ns.blizzJunkClick == w.blizzClick)
+  check("update hooked", type(w.hooks.MerchantFrame_Update) == "function")
+end
+
+-- 20. Native button, grays only: Blizzard's original click runs untouched.
+do
+  local w = newWorld()
+  loadAddon(w)
+  clientLoaded(w)
+  w.junkCount = 2
+  w.repairCan = false
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  w.junkSold = false
+  w.printed = {}
+  w.blizzClicked = false
+  w.hookedClick.OnClick(w.env.MerchantSellAllJunkButton)
+  check("blizzard click runs", w.blizzClicked == true)
+  check("no dry-run popup", #w.popups == 0)
+end
+
+-- 21. Native button with old gear: itemized dry-run, one confirm popup.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.junkCount = 3
   w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
   local old1 = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1200 })
   local old2 = gear(w, { slot = "INVTYPE_HEAD", level = 310, price = 800 })
   putBag(w, old1)
   putBag(w, old2)
-  ns.onSellOldGearClick()
-  check("dry-run header", w.printed[1] == "|cff66ccffVocVendor|r: old gear to sell (2):")
-  check("dry-run lists links", w.printed[2] == "  " .. old1 and w.printed[3] == "  " .. old2)
+  ns.opts().autoSell = false -- manual-only: keep the bags intact for the click
+  ns.opts().autoRepair = false
+  w.frame.onEvent(nil, "MERCHANT_SHOW") -- installs the button hook
+  w.hookedClick.OnClick(w.env.MerchantSellAllJunkButton)
+  check("dry-run header",
+    w.printed[1] == "|cff66ccffVocVendor|r: junk to sell (3 gray, 2 old gear):")
+  check("dry-run lists links",
+    w.printed[2] == "  " .. old1 and w.printed[3] == "  " .. old2)
   check("one popup", #w.popups == 1)
-  check("popup count", w.popups[1].a == 2)
+  check("popup count", w.popups[1].a == 5)
   check("popup total", w.popups[1].b == "20s 0c")
-  check("popup carries items", #(w.popups[1].data.items) == 2)
+  check("popup carries data",
+    w.popups[1].data.grayCount == 3 and #w.popups[1].data.oldGear == 2)
+  check("blizzard click skipped", w.blizzClicked == false)
 end
 
--- 19. Confirm sells exactly the listed slots; skips moved items.
+-- 22. Popup confirm sells both piles; moved bag slots are skipped.
 do
   local w = newWorld()
   local ns = loadAddon(w)
   clientLoaded(w)
+  w.junkCount = 2
+  w.junkValue = 450
   w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
-  local old1 = gear(w, { slot = "INVTYPE_HEAD", level = 300 })
-  local old2 = gear(w, { slot = "INVTYPE_HEAD", level = 310 })
+  local old1 = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  local old2 = gear(w, { slot = "INVTYPE_HEAD", level = 310, price = 1000 })
   local b1, s1 = putBag(w, old1)
   local b2, s2 = putBag(w, old2)
   -- Bag shifted between dry-run and confirm: old2 moved away.
   w.bags[b2][s2] = gear(w, { slot = "INVTYPE_HEAD", level = 399 })
-  ns.sellOldGearNow({
-    { link = old1, bag = b1, slot = s1 },
-    { link = old2, bag = b2, slot = s2 },
+  ns.sellJunkNow({
+    grayCount = 2,
+    oldGear = {
+      { link = old1, bag = b1, slot = s1, price = 1000 },
+      { link = old2, bag = b2, slot = s2, price = 1000 },
+    },
   })
+  check("grays sold on confirm", w.junkSold == true)
   check("only matching slot sold", #w.sold == 1)
   check("right slot sold", w.sold[1].bag == b1 and w.sold[1].slot == s1)
-  check("sold announce", w.printed[1] == "|cff66ccffVocVendor|r: sold 1 old items")
+  check("confirm announce",
+    w.printed[1] == "|cff66ccffVocVendor|r: sold 2 junk, 1 old gear for 14s 50c")
 end
 
--- 20. Vendor button: created once on first merchant visit.
+-- 23. refreshJunkButton: enabled with old gear but no grays, off when empty.
 do
   local w = newWorld()
-  loadAddon(w)
+  local ns = loadAddon(w)
   clientLoaded(w)
-  w.repairCan = false
-  w.frame.onEvent(nil, "MERCHANT_SHOW")
-  w.frame.onEvent(nil, "MERCHANT_SHOW")
-  local buttons = {}
-  for _, f in ipairs(w.frames) do
-    if f.text == "Sell Old Gear" then buttons[#buttons + 1] = f end
-  end
-  check("one button", #buttons == 1)
-  buttons[1].scripts.OnEnter(buttons[1])
-  check("button tooltip title", w.gametip.title == "Sell Old Gear")
-  -- Clicking with no candidates says so (no popup).
-  buttons[1].scripts.OnClick()
-  check("button click empty", w.printed[1] == "|cff66ccffVocVendor|r: no old gear to sell")
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300 }))
+  w.junkCount = 0
+  ns.refreshJunkButton()
+  check("enabled on old gear alone", w.buttonEnabled == true)
+  w.bags[0] = {}
+  ns.refreshJunkButton()
+  check("disabled when empty", w.buttonEnabled == false)
 end
 
--- 21. Slash: bare sells junk at a vendor, warns away from one.
+-- 24. Slash: bare runs the button flow at a vendor, warns away from one.
 do
   local w = newWorld()
   w.junkCount = 2
   loadAddon(w)
   clientLoaded(w)
-  w.env.SlashCmdList.VOCVENDOR("")
-  check("slash sells junk", w.junkSold == true)
+  w.repairCan = false
+  w.env.SlashCmdList.VOCVENDOR("off") -- manual-only mode
+  w.repairCan = false
+  w.frame.onEvent(nil, "MERCHANT_SHOW") -- installs the button hook
   w.junkSold = false
+  w.blizzClicked = false
+  w.env.SlashCmdList.VOCVENDOR("")
+  check("slash runs button flow", w.blizzClicked == true)
   w.merchantOpen = false
   w.env.SlashCmdList.VOCVENDOR("")
   check("slash warns away", w.printed[#w.printed] == "|cff66ccffVocVendor|r: open a vendor first")
-  check("slash no sale away", w.junkSold == false)
 end
 
--- 22. Slash: on/off toggles auto-sell; repair triggers repair.
+-- 25. Slash: on/off toggles auto-sell; repair triggers repair.
+-- 26. Slash: on/off toggles auto-sell; repair triggers repair.
 do
   local w = newWorld()
   local ns = loadAddon(w)
@@ -532,7 +611,7 @@ do
   check("slash repair", #w.repairs == 1)
 end
 
--- 23. Settings panel registers the expected controls.
+-- 27. Settings panel registers the expected controls.
 do
   local w = newWorld()
   loadAddon(w)
@@ -541,7 +620,7 @@ do
   check("autoSell setting", w.env.Settings and w.settingsReg["VocVendor_autoSell"] ~= nil)
   check("gap slider", w.settingsSliders == 1)
   check("gap default", w.settingsReg["VocVendor_oldGearIlvlGap"].default == 30)
-  check("checkboxes", w.settingsChecks == 6)
+  check("checkboxes", w.settingsChecks == 7)
 end
 
 print("ok - " .. passed .. " checks passed")

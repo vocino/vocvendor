@@ -25,14 +25,14 @@ globals = {
 read_globals = {
   "_G",
   "C_Container", "C_Item", "C_MerchantFrame",
-  "CreateFrame", "GameTooltip", "GetInventoryItemLink", "GetMoney",
-  "MerchantFrame", "NUM_BAG_SLOTS",
+  "CreateFrame", "GetInventoryItemLink", "GetMoney",
+  "MerchantFrame", "MerchantSellAllJunkButton", "NUM_BAG_SLOTS",
   "CanGuildBankRepair", "CanMerchantRepair", "GetRepairAllCost",
   "RepairAllItems",
   "Settings", "MinimalSliderWithSteppersMixin",
   "StaticPopup_Show",
   "Enum",
-  "strtrim",
+  "hooksecurefunc", "strtrim",
   -- VocDebug guest hook (our own addon, not a Blizzard API)
   "VOCDBG",
   -- Pawn (optional guest: never sell what it flags as an upgrade)
