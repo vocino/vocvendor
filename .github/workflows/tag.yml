@@ -1,0 +1,47 @@
+name: tag
+
+# Cut a release from anywhere: creates the version tag on the chosen
+# ref and dispatches release.yml at that tag. The same as running
+# `git tag vX.Y.Z && git push origin vX.Y.Z` by hand (see VERSIONING.md),
+# for places that cannot push tags, such as a cloud session.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to create, e.g. v1.2.3 (tags are never reused)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: create and push the tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "version must look like v1.2.3 (got '$VERSION')"; exit 1 ;;
+          esac
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null; then
+            echo "tag $VERSION already exists; tags are never moved (VERSIONING.md)"
+            exit 1
+          fi
+          git tag "$VERSION"
+          git push origin "refs/tags/$VERSION"
+
+      - name: start the release workflow at the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh workflow run release.yml --ref "$VERSION"
