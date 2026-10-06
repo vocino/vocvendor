@@ -1,0 +1,9 @@
+package-as: VocVendor
+
+ignore:
+  - .github
+  - .luacheckrc
+  - tests
+  - AGENTS.md
+  - FAMILY.md
+  - VERSIONING.md

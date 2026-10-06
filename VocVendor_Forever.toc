@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: VocVendor
+## Notes: Vendor automation: sell junk, repair, and a smart Sell Old Gear button.
+## Author: vocino
+## Version: @project-version@
+## Category: Bags & Inventory
+## SavedVariables: VocVendorDB
+## X-Website: https://github.com/vocino/vocvendor
+## X-License: MIT
+
+main.lua
