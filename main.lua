@@ -170,6 +170,10 @@ function ns.repairNow()
   end
   if didRepair then
     dbg("vocvendor", "repaired", "cost=" .. cost .. " guild=" .. tostring(usedGuild))
+    -- Blizzard's own repair button plays this; mirror it so the
+    -- automatic repair confirms the same way a click would.
+    local sound = (SOUNDKIT and SOUNDKIT.ITEM_REPAIR) or 7994
+    pcall(PlaySound, sound)
     if o.announce then
       ns.say("repaired for " .. ns.moneyString(cost)
         .. (usedGuild and " (guild funds)" or ""))

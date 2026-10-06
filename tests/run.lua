@@ -74,6 +74,8 @@ local function loadAddon(world)
     world.money = world.money - world.repairCost
   end
   g.CanGuildBankRepair = function() return world.guildRepair end
+  g.SOUNDKIT = { ITEM_REPAIR = 7994 }
+  g.PlaySound = function(id) world.playedSounds[#world.playedSounds + 1] = id end
   g.MerchantFrame = {
     IsShown = function() return world.merchantOpen end,
   }
@@ -169,6 +171,7 @@ local function newWorld()
     settingsReg = {}, settingsChecks = 0, settingsSliders = 0,
     settingsCategory = nil, savedVars = nil,
     blizzClicked = false, hookedClick = {}, hooks = {}, buttonEnabled = nil,
+    playedSounds = {},
   }
 end
 
@@ -304,6 +307,7 @@ do
   w.frame.onEvent(nil, "MERCHANT_SHOW")
   check("personal repair", #w.repairs == 1 and w.repairs[1] == false)
   check("repair announce", w.printed[1] == "|cff66ccffVocVendor|r: repaired for 2s 50c")
+  check("repair sound", w.playedSounds[1] == 7994)
 end
 
 -- 8. Guild funds first when the guild can repair.

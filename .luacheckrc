@@ -32,6 +32,7 @@ read_globals = {
   "Settings", "MinimalSliderWithSteppersMixin",
   "StaticPopup_Show",
   "Enum",
+  "SOUNDKIT", "PlaySound",
   "hooksecurefunc", "strtrim",
   -- VocDebug guest hook (our own addon, not a Blizzard API)
   "VOCDBG",
