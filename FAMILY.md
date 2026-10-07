@@ -41,6 +41,10 @@ identical in every Voc repository: change it in one, copy it to all.
 8. **Current build, official source.** The API is what Blizzard's own
    documentation says it is for the build in `## Interface:`, not what
    a wiki remembers from an older patch. See Sources of truth.
+9. **Every version of the game.** Each addon ships a Retail toc and a
+   Forever toc; the same code runs on both. Version-locked features
+   degrade silently behind presence gates instead of erroring, and a
+   missing API is never a missing addon.
 
 ## Sources of truth
 
