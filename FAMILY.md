@@ -13,7 +13,6 @@ identical in every Voc repository: change it in one, copy it to all.
 | VocGear | Equip bag upgrades out of combat (Pawn weights, or item level without Pawn) | `/vg`, `/vocgear` | https://github.com/vocino/vocgear |
 | VocXP | Session XP/hr and active XP bonuses in one tiny readout | `/vxp` | https://github.com/vocino/vocxp |
 | VocVendor | Vendor automation: junk is a configurable definition; auto-sell and auto-repair | `/vv`, `/vocvendor` | https://github.com/vocino/vocvendor |
-| VocDebug | Debug bus for addon development: structured lines to the chat log | `/vdbg` | https://github.com/vocino/vocdebug |
 
 ## Principles
 
