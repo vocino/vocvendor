@@ -1,6 +1,7 @@
 package-as: VocVendor
 
 ignore:
+  - .agents
   - .github
   - .luacheckrc
   - tests

@@ -1,0 +1,3 @@
+[submodule ".agents/skills/voc-addons"]
+	path = .agents/skills/voc-addons
+	url = https://github.com/vocino/voc-addons.git
