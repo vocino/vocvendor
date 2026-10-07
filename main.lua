@@ -125,6 +125,15 @@ function ns.junkSummary(junk, earned, nOld)
     .. ns.moneyString(earned)
 end
 
+-- Sale confirmation: the click Blizzard's own merchant buttons use
+-- (MerchantFrame.lua in the live UI source), with a numeric fallback
+-- so a Blizzard rename never silently kills the polish. Independent of
+-- the announce toggle: sound confirms the action, chat reports it.
+function ns.sellSound()
+  local sound = (SOUNDKIT and SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON) or 856
+  pcall(PlaySound, sound)
+end
+
 -- Auto path: sells the whole configured definition, no popup. The player
 -- opted into every part of it via settings.
 function ns.autoSell()
@@ -135,23 +144,24 @@ function ns.autoSell()
   local nOld, oldValue = ns.sellOldGearItems(junk.oldGear)
   dbg("vocvendor", "auto_sell",
     "gray=" .. junk.grayCount .. " old=" .. nOld)
-  if ns.opts().announce then
-    local line = ns.junkSummary(junk, earned + oldValue, nOld)
-    if line then ns.say(line) end
+  local line = ns.junkSummary(junk, earned + oldValue, nOld)
+  if line then
+    ns.sellSound()
+    if ns.opts().announce then ns.say(line) end
   end
 end
 
 -- Repair. Mirrors the merchant frame's own buttons: guild first when
 -- allowed (RepairAllItems(true)), own gold otherwise. If the guild
 -- attempt leaves damage behind (no funds / no permission), fall back to
--- personal gold. Announces only when something was actually repaired.
+-- personal gold. Announces only when repaired; returns whether it did.
 function ns.repairNow()
-  if type(CanMerchantRepair) ~= "function" or not CanMerchantRepair() then return end
-  if type(GetRepairAllCost) ~= "function" then return end
-  if type(RepairAllItems) ~= "function" then return end
+  if type(CanMerchantRepair) ~= "function" or not CanMerchantRepair() then return false end
+  if type(GetRepairAllCost) ~= "function" then return false end
+  if type(RepairAllItems) ~= "function" then return false end
   local ok, cost, canRepair = pcall(GetRepairAllCost)
   cost = tonumber(cost) or 0
-  if not ok or not canRepair or cost == 0 then return end
+  if not ok or not canRepair or cost == 0 then return false end
   local usedGuild = false
   local didRepair = false
   local o = ns.opts()
@@ -179,6 +189,7 @@ function ns.repairNow()
         .. (usedGuild and " (guild funds)" or ""))
     end
   end
+  return didRepair
 end
 
 function ns.onMerchantShow()
@@ -231,6 +242,10 @@ end
 -- Blizzard's original click and popup.
 function ns.onJunkButtonClick(button)
   local junk = ns.collectJunk()
+  if junk.grayCount == 0 and #junk.oldGear == 0 then
+    ns.say("nothing to sell")
+    return
+  end
   if #junk.oldGear == 0 then
     if type(ns.blizzJunkClick) == "function" then
       ns.blizzJunkClick(button)
@@ -255,10 +270,11 @@ function ns.sellJunkNow(data)
   local nOld, oldValue = ns.sellOldGearItems(data.oldGear)
   dbg("vocvendor", "manual_sell",
     "gray=" .. (data.grayCount or 0) .. " old=" .. nOld)
-  if ns.opts().announce then
-    local line = ns.junkSummary(
+  local line = ns.junkSummary(
       { grayCount = data.grayCount or 0 }, earned + oldValue, nOld)
-    if line then ns.say(line) end
+  if line then
+    ns.sellSound()
+    if ns.opts().announce then ns.say(line) end
   end
 end
 
@@ -424,6 +440,14 @@ function ns.openConfig()
   if not ok then ns.say("open Settings > AddOns > VocVendor") end
 end
 
+-- Addon compartment entry, wired declaratively: ## AddonCompartmentFunc
+-- in the .toc names this function, and Blizzard's compartment menu
+-- calls it with (addonName, buttonName). Clients without the
+-- compartment ignore the metadata, so no gate is needed here.
+function VocVendor_CompartmentClick()
+  ns.openConfig()
+end
+
 -- Slash. Bare command runs the manual junk sale (same as clicking the
 -- native Sell Junk button); on/off flips auto-sell.
 ns.HELP = {
@@ -452,7 +476,11 @@ SlashCmdList.VOCVENDOR = function(msg)
     o.autoSell = (msg == "on")
     ns.say("auto-sell junk " .. (o.autoSell and "on" or "off"))
   elseif msg == "repair" then
-    ns.repairNow()
+    if type(MerchantFrame) ~= "table" or not MerchantFrame:IsShown() then
+      ns.say("open a vendor first")
+      return
+    end
+    if not ns.repairNow() then ns.say("nothing to repair") end
   elseif msg == "config" then
     ns.openConfig()
   else

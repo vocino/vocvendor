@@ -19,6 +19,7 @@ globals = {
   "SLASH_VOCVENDOR1", "SLASH_VOCVENDOR2",
   "SlashCmdList",
   "StaticPopupDialogs",
+  "VocVendor_CompartmentClick",
 }
 
 -- WoW API and UI globals read by the addon.

@@ -74,7 +74,7 @@ local function loadAddon(world)
     world.money = world.money - world.repairCost
   end
   g.CanGuildBankRepair = function() return world.guildRepair end
-  g.SOUNDKIT = { ITEM_REPAIR = 7994 }
+  g.SOUNDKIT = { ITEM_REPAIR = 7994, IG_MAINMENU_OPTION_CHECKBOX_ON = 856 }
   g.PlaySound = function(id) world.playedSounds[#world.playedSounds + 1] = id end
   g.MerchantFrame = {
     IsShown = function() return world.merchantOpen end,
@@ -294,6 +294,7 @@ do
   w.frame.onEvent(nil, "MERCHANT_SHOW")
   check("no junk no sale", w.junkSold == false)
   check("no junk no announce", #w.printed == 0)
+  check("no sound when empty", #w.playedSounds == 0)
 end
 
 -- 7. Auto-repair, personal gold.
@@ -625,6 +626,73 @@ do
   check("gap slider", w.settingsSliders == 1)
   check("gap default", w.settingsReg["VocVendor_oldGearIlvlGap"].default == 30)
   check("checkboxes", w.settingsChecks == 7)
+end
+
+-- 28. Compartment click opens the addon's Settings category.
+do
+  local w = newWorld()
+  loadAddon(w)
+  clientLoaded(w)
+  local opened = nil
+  w.env.Settings.OpenToCategory = function(id) opened = id end
+  check("compartment global", type(w.env.VocVendor_CompartmentClick) == "function")
+  w.env.VocVendor_CompartmentClick("VocVendor", "LeftButton")
+  check("compartment opens config", opened == 7)
+  w.env.Settings = nil -- Settings API missing: say where, don't error
+  w.env.VocVendor_CompartmentClick("VocVendor", "LeftButton")
+  check("compartment fallback",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: open Settings > AddOns > VocVendor")
+end
+
+-- 29. Auto-sell confirms with the merchant click, even unannounced.
+do
+  local w = newWorld()
+  w.junkCount = 3
+  w.junkValue = 450
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().announce = false
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("sell sound without announce", w.playedSounds[1] == 856)
+  check("no chat without announce", #w.printed == 0)
+end
+
+-- 30. Popup confirm plays the numeric fallback when SOUNDKIT renames.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.env.SOUNDKIT = {} -- Blizzard renamed the constant: fallback covers it
+  w.junkCount = 2
+  w.junkValue = 450
+  ns.sellJunkNow({ grayCount = 2, oldGear = {} })
+  check("fallback sound", w.playedSounds[1] == 856)
+end
+
+-- 31. Manual no-ops answer instead of staying silent.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.junkCount = 0
+  w.repairCan = false
+  w.env.SlashCmdList.VOCVENDOR("")
+  check("nothing to sell", w.printed[1] == "|cff66ccffVocVendor|r: nothing to sell")
+  check("native click skipped when empty", w.blizzClicked == false)
+  check("repairNow reports nothing", ns.repairNow() == false)
+  w.env.SlashCmdList.VOCVENDOR("repair")
+  check("nothing to repair", w.printed[2] == "|cff66ccffVocVendor|r: nothing to repair")
+  w.merchantOpen = false
+  w.env.SlashCmdList.VOCVENDOR("repair")
+  check("repair away from vendor",
+    w.printed[3] == "|cff66ccffVocVendor|r: open a vendor first")
+  w.merchantOpen = true
+  w.repairCost = 100
+  w.repairCan = true
+  w.env.SlashCmdList.VOCVENDOR("repair")
+  check("repair success announces",
+    w.printed[4] == "|cff66ccffVocVendor|r: repaired for 1s 0c")
 end
 
 print("ok - " .. passed .. " checks passed")

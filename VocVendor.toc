@@ -1,11 +1,12 @@
 ## Interface: 120100
 ## Title: VocVendor
-## Notes: Vendor automation: junk is a configurable definition; auto-sell and auto-repair.
+## Notes: Vendor automation: junk is a configurable definition; auto-sell and auto-repair. (/vv)
 ## Author: vocino
 ## Version: @project-version@
 ## Category: Bags & Inventory
 ## IconTexture: Interface\Icons\INV_Misc_Coin_02
 ## SavedVariables: VocVendorDB
+## AddonCompartmentFunc: VocVendor_CompartmentClick
 ## X-Website: https://github.com/vocino/vocvendor
 ## X-License: MIT
 
