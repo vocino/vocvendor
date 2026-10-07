@@ -21,3 +21,10 @@ jobs:
 
       - name: lint
         run: luacheck .
+
+      - name: skill checks
+        run: |
+          git clone --depth 1 https://github.com/vocino/voc-addons.git /tmp/voc-addons
+          bash /tmp/voc-addons/checks/no-hardcoded-colors.sh .
+          bash /tmp/voc-addons/checks/no-reloadui.sh .
+          bash /tmp/voc-addons/checks/dual-toc.sh .
