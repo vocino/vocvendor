@@ -36,7 +36,6 @@ read_globals = {
   "SOUNDKIT", "PlaySound",
   "hooksecurefunc", "strtrim",
   -- VocDebug guest hook (our own addon, not a Blizzard API)
-  "VOCDBG",
   -- Pawn (optional guest: never sell what it flags as an upgrade)
   "PawnGetItemData", "PawnIsItemAnUpgrade",
 }

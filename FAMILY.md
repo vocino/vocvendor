@@ -248,28 +248,22 @@ readable in one sitting.
 ## Debugging
 
 The coding agent is blind in game: only Lua errors surface on their
-own. VocDebug is the family debug bus, built for the agent, not for
-manual checking.
+own. The family debugs with the community's tools, not its own.
 
-- Every addon carries the guest hook
-  `local dbg = VOCDBG or function() end` (silent no-op unless
-  VocDebug is loaded) and emits behavior events on it:
-  `dbg("<addon>", "<event>", "k=v k=v")`. `VOCDBG` is listed in each
-  repo's `.luacheckrc` read_globals, marked as our own addon.
-- Lines go to the private `vocdbg` channel as
-  `[VOCDBG] <session> <addon> <event> <payload>` and, with chat
-  logging on, land in `WoWChatLog.txt`. Lua errors ride the same bus
-  as `errors/lua_error` (VocDebug replaces BugGrabber/BugSack).
-- Emit on change, not on poll: a `bonuses_changed` when the set
-  changes, never a `bonus_poll` every tick. One line per meaningful
-  thing that happened.
-- The agent loop: the agent implements, hands the player numbered
-  actions and a mark label; the player runs `/vdbg mark <label>`
-  and does the actions; the agent reads `vocdebug since <label>`
-  (`tools/vocdebug` in the VocDebug repo, python3 stdlib) and
-  reports what fired, what didn't, and where the gaps are. On a
-  machine that also runs WoW, the agent reads the log directly —
-  no paste step.
+- **!BugGrabber** captures every Lua error with stack and context.
+  **BugSack** is the in-game viewer (`/bugsack`). Both are
+  installed on the dev machine; recommend them to anyone filing
+  a bug.
+- Errors persist to
+  `WTF/Account/<account>/SavedVariables/!BugGrabber.lua` on
+  `/reload` or logout. The agent loop: the player reproduces the
+  problem, runs `/reload`, and the agent reads that file directly
+  — no paste step on a machine that also runs WoW.
+- Parse with regex on `["message"]` fields, never brace-counting:
+  the `["locals"]` dump nests braces and breaks structural
+  parsers.
+- Stale records survive a fix. Confirm the player reproduced the
+  issue again before trusting a record.
 
 ## Releases
 

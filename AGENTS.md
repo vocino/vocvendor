@@ -41,8 +41,8 @@ local-checkout recipe: `FAMILY.md`, Sources of truth.
 VocVendor is one of the Voc addons. Naming, slash grammar, chat voice,
 settings, layout, and docs follow `FAMILY.md`; that file is identical
 in every sibling repo, so edit it everywhere or not at all.
-Debugging follows `FAMILY.md` "Debugging": the `dbg` guest hook and
-the agent loop (`/vdbg mark`, `vocdebug since`).
+Debugging follows `FAMILY.md` "Debugging": !BugGrabber +
+BugSack, errors read from `!BugGrabber.lua` after `/reload`.
 Craft follows the `voc-addons` skill, the source of truth for how Voc
 addons look, feel, and behave; load it before UI, settings, tooltip,
 sound, or visual-polish work.

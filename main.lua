@@ -24,9 +24,6 @@
 
 local name, ns = ...
 
--- VocDebug guest hook: silent no-op unless VocDebug is loaded.
-local dbg = VOCDBG or function() end
-
 ns.PREFIX_COLOR = "ff66ccff"
 function ns.say(msg)
   print("|c" .. ns.PREFIX_COLOR .. name .. "|r: " .. tostring(msg))
@@ -142,8 +139,6 @@ function ns.autoSell()
   local earned = 0
   if junk.grayCount > 0 then earned = ns.sellGrays() end
   local nOld, oldValue = ns.sellOldGearItems(junk.oldGear)
-  dbg("vocvendor", "auto_sell",
-    "gray=" .. junk.grayCount .. " old=" .. nOld)
   local line = ns.junkSummary(junk, earned + oldValue, nOld)
   if line then
     ns.sellSound()
@@ -179,7 +174,6 @@ function ns.repairNow()
     didRepair = true
   end
   if didRepair then
-    dbg("vocvendor", "repaired", "cost=" .. cost .. " guild=" .. tostring(usedGuild))
     -- Blizzard's own repair button plays this; mirror it so the
     -- automatic repair confirms the same way a click would.
     local sound = (SOUNDKIT and SOUNDKIT.ITEM_REPAIR) or 7994
@@ -268,8 +262,6 @@ function ns.sellJunkNow(data)
   local earned = 0
   if (data.grayCount or 0) > 0 then earned = ns.sellGrays() end
   local nOld, oldValue = ns.sellOldGearItems(data.oldGear)
-  dbg("vocvendor", "manual_sell",
-    "gray=" .. (data.grayCount or 0) .. " old=" .. nOld)
   local line = ns.junkSummary(
       { grayCount = data.grayCount or 0 }, earned + oldValue, nOld)
   if line then
