@@ -11,7 +11,7 @@ identical in every Voc repository: change it in one, copy it to all.
 | --- | --- | --- | --- |
 | VocWarbank | Audit the warband bank, bank, and bags; draw the line; clean house | `/vw`, `/vocwarbank` | https://github.com/vocino/vocwarbank |
 | VocGear | Equip bag upgrades out of combat (Pawn weights, or item level without Pawn) | `/vg`, `/vocgear` | https://github.com/vocino/vocgear |
-| VocXP | Session XP/hr and active XP bonuses in one tiny readout | `/vxp` | https://github.com/vocino/vocxp |
+| VocXP | Session XP/hr and active XP bonuses in one tiny readout | `/vxp`, `/vocxp` | https://github.com/vocino/vocxp |
 | VocVendor | Vendor automation: junk is a configurable definition; auto-sell and auto-repair | `/vv`, `/vocvendor` | https://github.com/vocino/vocvendor |
 
 ## Principles
@@ -57,7 +57,9 @@ order:
    Outside the client, the same files are mirrored per branch at
    https://github.com/Gethe/wow-ui-source under
    `Interface/AddOns/Blizzard_APIDocumentationGenerated/`: `live` is
-   the current retail build, `ptr` and `beta` are what is coming.
+   the current retail build, `forever` is the Forever client, `ptr`
+   and `beta` are what is coming. An API is verified on both `live`
+   and `forever` before it ships unguarded (principle 9).
    Function names, namespaces, argument and return lists, and events
    come from here and nowhere else.
 2. **Blizzard's UI source for the build**, same mirror: how Blizzard
@@ -143,8 +145,9 @@ directory and run in CI on every repo.
   introduce an unprefixed global.
 - Each file begins `local name, ns = ...` (or `local _, ns = ...`
   when the name is unused) and puts state on `ns`, never on `_G`.
-- The slash command has a short form (`/v` + one letter) and the
-  full name as a long form (`/vocgear`). Both are documented.
+- The slash command has a short form (`/v` + one letter or two) and
+  the full name as a long form (`/vocgear`). Both are documented, and
+  the help text says so: "(/vocgear works too)".
 
 ## Slash grammar
 
@@ -156,8 +159,17 @@ directory and run in CI on every repo.
 ```
 
 Anything unrecognized prints help; it never performs an action, so a
-typo can never toggle, sell, or equip. Help prints one subcommand
-per line, the command padded so descriptions line up.
+typo can never toggle, sell, or equip. `config` and `help` exist in
+every addon, however few options it has. Help is an `ns.HELP` table,
+one subcommand per line, the command padded so descriptions line up,
+`config` second to last and `help` last:
+
+```
+/vg            toggle auto-equip on/off
+/vg scan       check bags now
+/vg config     open Settings > AddOns > VocGear
+/vg help       this list (/vocgear works too)
+```
 
 ## Chat voice
 
@@ -173,8 +185,75 @@ end
 
 One line per event. Announce-once per session for advice that would
 otherwise repeat on every scan. Lower-case first word after the
-prefix ("equipped ...", "price source set to ..."). Every line is a
+prefix ("equipped ...", "price source set to ..."). No trailing
+period: a chat line is a log entry, not a sentence. Every line is a
 fact or a next step, never a greeting.
+
+## Sounds
+
+Every toggle and every window confirms with a Blizzard sound (the
+`voc-addons` skill, principle 3). The helper is the same in every
+addon, SOUNDKIT names first and the numeric IDs behind them, so a
+Blizzard rename never silences the polish and a missing sound API
+never errors:
+
+```lua
+ns.SOUNDS = {
+  on = { "IG_MAINMENU_OPTION_CHECKBOX_ON", 856 },
+  off = { "IG_MAINMENU_OPTION_CHECKBOX_OFF", 857 },
+  open = { "IG_MAINMENU_OPEN", 850 },
+  close = { "IG_MAINMENU_CLOSE", 851 },
+}
+function ns.play(kind)
+  local s = ns.SOUNDS[kind]
+  if not s or type(PlaySound) ~= "function" then return end
+  local id = type(SOUNDKIT) == "table" and SOUNDKIT[s[1]] or nil
+  pcall(PlaySound, type(id) == "number" and id or s[2])
+end
+```
+
+Toggles use `on`/`off`, windows and readouts `open`/`close`. An
+addon with a sound of its own (repair, equip) adds a key to the same
+table; nothing calls `PlaySound` directly.
+
+## Palette
+
+Colors are defined once per addon and referenced by name, never
+written at a call site (the skill's principle 2 and its
+`no-hardcoded-colors.sh` check). The family tokens:
+
+```lua
+ns.COLORS = {
+  gold = { 1, 0.82, 0 },         -- titles, emphasis, the one accent per screen
+  text = { 1, 1, 1 },            -- body
+  muted = { 0.5, 0.5, 0.5 },     -- hints, secondary text
+  red = { 0.9, 0.3, 0.25 },      -- restriction lines and warnings only (brick, not pure red)
+  green = { 0.25, 0.9, 0.35 },   -- valid state only
+}
+```
+
+A single-file addon keeps the table in `main.lua`; a multi-file addon
+keeps it in `palette.lua`, loaded first. Data colors an addon owns
+(item quality, verdicts) live in the same place.
+
+## Addon compartment
+
+Every addon registers with Blizzard's addon compartment (the minimap
+addon menu) through its `.toc`, so a player who never learns the
+slash command still finds it:
+
+```
+## AddonCompartmentFunc: <Name>_CompartmentClick
+## AddonCompartmentFuncOnEnter: <Name>_CompartmentEnter
+## AddonCompartmentFuncOnLeave: <Name>_CompartmentLeave
+```
+
+The click opens the addon's window when it has one (VocWarbank,
+VocXP) and its settings panel otherwise (VocGear, VocVendor). Hover
+follows the tooltip contract: gold title, one white line saying what
+the addon does, one muted line teaching the slash command. The three
+globals are the only ones the compartment needs and they carry the
+addon prefix like every other global.
 
 ## Settings
 
@@ -187,6 +266,11 @@ fact or a next step, never a greeting.
   `Settings.RegisterVerticalLayoutCategory("<Name>")`, built from
   `Settings.RegisterAddOnSetting` plus `CreateCheckbox`,
   `CreateSlider`, and `CreateDropdown`. No hand-drawn canvas panels.
+  Every addon has one, even when its only options are show and lock:
+  the panel is where a player who never reads help finds the addon.
+- Registration is retried at `PLAYER_LOGIN` when the Settings API was
+  not up at `ADDON_LOADED`, and every setting carries a value-changed
+  callback so the change applies at once.
 - Free-text options (names, keys) live on the slash line, and the
   panel says so.
 - `/<short> config` opens the category; when the Settings API is
@@ -196,7 +280,8 @@ fact or a next step, never a greeting.
 
 ```
 <Name>/
-  <Name>.toc            metadata (template below)
+  <Name>.toc            Retail metadata (template below)
+  <Name>_Forever.toc    the same, for the Forever client (principle 9)
   *.lua                 the addon; one file or a few, never a framework
   tests/run.lua         headless tests, run with `lua tests/run.lua`
   README.md             user docs (template below)
@@ -208,8 +293,9 @@ fact or a next step, never a greeting.
   .luacheckrc           lint config declaring the addon's globals
   .gitignore            `.reference/` local analysis checkouts
   .github/workflows/
-    test.yml            tests + luacheck on every push and PR
+    test.yml            tests, luacheck, and the skill checks on every push and PR
     release.yml         BigWigsMods packager on `v*` tags
+    tag.yml             cuts a tag from anywhere that cannot push one
 ```
 
 No embedded libraries (Ace3 and friends). The whole addon stays
@@ -220,20 +306,26 @@ readable in one sitting.
 ```
 ## Interface: <current retail build>
 ## Title: <Name>
-## Notes: <one sentence, what it does>
+## Notes: <one sentence, what it does> (/<short>)
 ## Author: vocino
 ## Version: @project-version@
-## Category: Bags & Inventory
+## Category: <a Blizzard addon-list category>
 ## IconTexture: Interface\Icons\<an existing game icon>
 ## SavedVariables: <Name>DB
-## RequiredDeps / OptionalDeps: ...
+## OptionalDeps: ...
+## AddonCompartmentFunc: <Name>_CompartmentClick
+## AddonCompartmentFuncOnEnter: <Name>_CompartmentEnter
+## AddonCompartmentFuncOnLeave: <Name>_CompartmentLeave
 ## X-Website: https://github.com/vocino/<name>
 ## X-License: MIT
 ## X-Curse-Project-ID: <id>
 ## X-Wago-ID: <id>
 ```
 
-`## Version` is never hand-edited; the packager fills it from the tag.
+`<Name>_Forever.toc` is the same file with the Forever `## Interface`
+and "(Forever client)" appended to the notes; both list the same Lua
+files. `## Version` is never hand-edited; the packager fills it from
+the tag. Nothing is a `RequiredDeps`: other addons are guests.
 
 ## Tests and lint
 
@@ -276,14 +368,18 @@ are the changelog, so write `feat:`, `fix:`, `docs:`, `chore:`,
 
 `README.md` sections, in order: the pitch (one paragraph), Install,
 Use (with the slash block), Config, How it works, What's inside,
-Tests, License, and the family footer:
+Tests, License, and the family footer. The footer names every member
+in Members order, this addon included, so it is identical in every
+repo:
 
 ```
 ---
 
 Part of the Voc family: tiny addons that do one job.
-Siblings: [VocWarbank](https://github.com/vocino/vocwarbank) ·
-[VocGear](https://github.com/vocino/vocgear)
+[VocWarbank](https://github.com/vocino/vocwarbank) ·
+[VocGear](https://github.com/vocino/vocgear) ·
+[VocXP](https://github.com/vocino/vocxp) ·
+[VocVendor](https://github.com/vocino/vocvendor)
 ```
 
 `AGENTS.md` sections: Code Map, API references (the short form of
@@ -292,8 +388,9 @@ Sources of truth, since agents read `AGENTS.md` first), Family
 
 ## Adding an addon
 
-1. Copy the layout above from a sibling, rename everything.
+1. Copy the layout above from a sibling, rename everything: both
+   tocs, the compartment globals, the palette, the sound helper.
 2. Add a row to Members here, then copy this file to every sibling.
-3. Add the sibling link to every README footer.
+3. Add the sibling link to every README footer, every repo.
 4. Register CurseForge and Wago projects, fill in the `.toc` ids and
    the workflow secrets.

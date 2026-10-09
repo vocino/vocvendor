@@ -24,10 +24,43 @@
 
 local name, ns = ...
 
+-- Chat voice shared by every Voc addon (see FAMILY.md): one line, the
+-- addon name as a colored prefix, then the message.
 ns.PREFIX_COLOR = "ff66ccff"
 function ns.say(msg)
   print("|c" .. ns.PREFIX_COLOR .. name .. "|r: " .. tostring(msg))
 end
+
+-- Confirmation sounds shared by every Voc addon (FAMILY.md "Sounds"):
+-- SOUNDKIT names first, the numeric IDs behind them so a Blizzard
+-- rename never silences the polish. Presence-gated: no sound API, no
+-- sound, never an error. `sell` is the click Blizzard's own merchant
+-- buttons use; `repair` is what its repair button plays.
+ns.SOUNDS = {
+  on = { "IG_MAINMENU_OPTION_CHECKBOX_ON", 856 },
+  off = { "IG_MAINMENU_OPTION_CHECKBOX_OFF", 857 },
+  open = { "IG_MAINMENU_OPEN", 850 },
+  close = { "IG_MAINMENU_CLOSE", 851 },
+  sell = { "IG_MAINMENU_OPTION_CHECKBOX_ON", 856 },
+  repair = { "ITEM_REPAIR", 7994 },
+}
+function ns.play(kind)
+  local s = ns.SOUNDS[kind]
+  if not s or type(PlaySound) ~= "function" then return end
+  local id = type(SOUNDKIT) == "table" and SOUNDKIT[s[1]] or nil
+  pcall(PlaySound, type(id) == "number" and id or s[2])
+end
+
+-- Palette (FAMILY.md "Palette"), defined once. VocVendor paints only
+-- its compartment tooltip, so only the text tokens are ever read.
+ns.COLORS = {
+  gold = { 1, 0.82, 0 },
+  text = { 1, 1, 1 },
+  muted = { 0.5, 0.5, 0.5 },
+  red = { 0.9, 0.3, 0.25 },
+  green = { 0.25, 0.9, 0.35 },
+}
+local COLORS = ns.COLORS
 
 -- The junk definition. Grays are always junk (Blizzard's own baseline,
 -- and what the native button's tooltip promises). Old gear joins the
@@ -122,13 +155,10 @@ function ns.junkSummary(junk, earned, nOld)
     .. ns.moneyString(earned)
 end
 
--- Sale confirmation: the click Blizzard's own merchant buttons use
--- (MerchantFrame.lua in the live UI source), with a numeric fallback
--- so a Blizzard rename never silently kills the polish. Independent of
--- the announce toggle: sound confirms the action, chat reports it.
+-- Sale confirmation, independent of the announce toggle: sound confirms
+-- the action, chat reports it.
 function ns.sellSound()
-  local sound = (SOUNDKIT and SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON) or 856
-  pcall(PlaySound, sound)
+  ns.play("sell")
 end
 
 -- Auto path: sells the whole configured definition, no popup. The player
@@ -176,8 +206,7 @@ function ns.repairNow()
   if didRepair then
     -- Blizzard's own repair button plays this; mirror it so the
     -- automatic repair confirms the same way a click would.
-    local sound = (SOUNDKIT and SOUNDKIT.ITEM_REPAIR) or 7994
-    pcall(PlaySound, sound)
+    ns.play("repair")
     if o.announce then
       ns.say("repaired for " .. ns.moneyString(cost)
         .. (usedGuild and " (guild funds)" or ""))
@@ -432,27 +461,48 @@ function ns.openConfig()
   if not ok then ns.say("open Settings > AddOns > VocVendor") end
 end
 
--- Addon compartment entry, wired declaratively: ## AddonCompartmentFunc
--- in the .toc names this function, and Blizzard's compartment menu
--- calls it with (addonName, buttonName). Clients without the
--- compartment ignore the metadata, so no gate is needed here.
+-- Addon compartment (FAMILY.md "Addon compartment"): the toc names
+-- these three globals; Blizzard's compartment menu calls them with
+-- (addonName, button). VocVendor has no window, so the click opens its
+-- settings; hover follows the tooltip contract: gold title, one line,
+-- the slash hint. Clients without the compartment ignore the metadata.
 function VocVendor_CompartmentClick()
   ns.openConfig()
 end
 
--- Slash. Bare command runs the manual junk sale (same as clicking the
--- native Sell Junk button); on/off flips auto-sell.
+function VocVendor_CompartmentEnter(_, button)
+  if type(GameTooltip) ~= "table" then return end
+  GameTooltip:SetOwner(button, "ANCHOR_LEFT")
+  GameTooltip:SetText("VocVendor", COLORS.gold[1], COLORS.gold[2], COLORS.gold[3])
+  GameTooltip:AddLine("Sells junk and repairs on every vendor visit. Junk is what you define.",
+    COLORS.text[1], COLORS.text[2], COLORS.text[3], true)
+  GameTooltip:AddLine("/vv sells junk now. /vv help lists the rest.",
+    COLORS.muted[1], COLORS.muted[2], COLORS.muted[3], true)
+  GameTooltip:Show()
+end
+
+function VocVendor_CompartmentLeave()
+  if type(GameTooltip) == "table" then GameTooltip:Hide() end
+end
+
+-- Slash grammar shared by every Voc addon (FAMILY.md): the bare command
+-- does the one main thing (the manual junk sale, same as the native
+-- Sell Junk button), `config` opens the panel, `help` lists the rest,
+-- and anything unrecognized prints help instead of acting.
 ns.HELP = {
-  "/vv -- sell junk now",
-  "/vv on|off -- auto-sell junk on vendor visits",
-  "/vv repair -- repair now",
-  "/vv config -- open settings",
+  "/vv            sell junk now",
+  "/vv on|off     auto-sell junk on vendor visits",
+  "/vv repair     repair now",
+  "/vv config     open Settings > AddOns > VocVendor",
+  "/vv help       this list (/vocvendor works too)",
 }
 function ns.help()
   ns.say("commands")
   for _, line in ipairs(ns.HELP) do print("  " .. line) end
 end
 
+-- Blizzard's slash dispatcher reads SLASH_* globals by name, so these
+-- cannot be namespaced (they are declared in .luacheckrc instead).
 SLASH_VOCVENDOR1 = "/vv"
 SLASH_VOCVENDOR2 = "/vocvendor"
 SlashCmdList.VOCVENDOR = function(msg)
@@ -466,6 +516,7 @@ SlashCmdList.VOCVENDOR = function(msg)
     ns.onJunkButtonClick(MerchantSellAllJunkButton)
   elseif msg == "on" or msg == "off" then
     o.autoSell = (msg == "on")
+    ns.play(o.autoSell and "on" or "off")
     ns.say("auto-sell junk " .. (o.autoSell and "on" or "off"))
   elseif msg == "repair" then
     if type(MerchantFrame) ~= "table" or not MerchantFrame:IsShown() then
@@ -483,12 +534,17 @@ end
 -- Events
 ns.frame = CreateFrame("Frame")
 ns.frame:RegisterEvent("ADDON_LOADED")
+ns.frame:RegisterEvent("PLAYER_LOGIN")
 ns.frame:RegisterEvent("MERCHANT_SHOW")
 ns.frame:SetScript("OnEvent", function(_, event, arg1)
   if event == "ADDON_LOADED" and arg1 == name then
+    -- The client replaces the SavedVariables global with the loaded
+    -- table after our file ran, so rebind or settings never persist.
     if type(VocVendorDB) ~= "table" then VocVendorDB = {} end
     ns.db = VocVendorDB
     ns.ensureSettings()
+  elseif event == "PLAYER_LOGIN" then
+    ns.ensureSettings() -- in case Settings wasn't up at ADDON_LOADED
   elseif event == "MERCHANT_SHOW" then
     ns.onMerchantShow()
   end
