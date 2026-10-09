@@ -2,8 +2,11 @@
 
 Tiny World of Warcraft addons that each do one job, install
 independently, and feel like one product when they meet. This file
-is the contract that makes that true. It is kept word-for-word
-identical in every Voc repository: change it in one, copy it to all.
+is the contract that makes that true. The canonical copy lives in
+the `voc-addons` skill (`family/FAMILY.md`, beside `VERSIONING.md`);
+every Voc repository carries a byte-identical copy, and the skill's
+`checks/family-docs.sh` fails CI when a copy drifts. Change it in the
+skill, then copy it to every repo.
 
 ## Members
 
@@ -101,7 +104,9 @@ How the rule holds without anyone watching:
 - `.luacheckrc` lists every WoW global the addon reads, and lint
   fails on any other, so a stale name cannot ship by accident. A name
   is added only after it is confirmed in source 1 for the current
-  build, and the commit says so.
+  build, and the commit says so. The skill's
+  `checks/no-deprecated-globals.sh` rejects the names Blizzard has
+  already moved into a `C_*` namespace, in code and in the allowlist.
 - Third-party addon APIs (Pawn, Syndicator, Auctionator, TSM, and so
   on) are verified against that addon's current source, kept as a
   local checkout under `.reference/` (gitignored), with the finding
@@ -359,7 +364,8 @@ own. The family debugs with the community's tools, not its own.
 
 ## Releases
 
-See `VERSIONING.md` (identical in every repo): tag-driven semver,
+See `VERSIONING.md` (canonical in the skill, identical in every repo,
+checked in CI): tag-driven semver,
 `v*` tags trigger the packager, tags are never moved. Commit subjects
 are the changelog, so write `feat:`, `fix:`, `docs:`, `chore:`,
 `test:`, `refactor:` lines a player can read.
@@ -390,7 +396,8 @@ Sources of truth, since agents read `AGENTS.md` first), Family
 
 1. Copy the layout above from a sibling, rename everything: both
    tocs, the compartment globals, the palette, the sound helper.
-2. Add a row to Members here, then copy this file to every sibling.
+2. Add a row to Members in the skill's `family/FAMILY.md`, then copy
+   it to every sibling; CI holds the copies identical.
 3. Add the sibling link to every README footer, every repo.
 4. Register CurseForge and Wago projects, fill in the `.toc` ids and
    the workflow secrets.
