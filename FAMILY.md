@@ -107,6 +107,10 @@ How the rule holds without anyone watching:
   build, and the commit says so. The skill's
   `checks/no-deprecated-globals.sh` rejects the names Blizzard has
   already moved into a `C_*` namespace, in code and in the allowlist.
+- Every Blizzard name the family relies on has a row in the skill's
+  `references/api-ledger.md` with the verdict of `tools/verify-api`
+  on both branches: the shared, auditable record. A new name gets its
+  row in the same change that adds it to `.luacheckrc`.
 - Third-party addon APIs (Pawn, Syndicator, Auctionator, TSM, and so
   on) are verified against that addon's current source, kept as a
   local checkout under `.reference/` (gitignored), with the finding
