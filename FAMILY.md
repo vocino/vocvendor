@@ -394,8 +394,12 @@ Sources of truth, since agents read `AGENTS.md` first), Family
 
 ## Adding an addon
 
-1. Copy the layout above from a sibling, rename everything: both
-   tocs, the compartment globals, the palette, the sound helper.
+1. Scaffold it: `tools/new-addon <Name> <short> <dir>` in the
+   `voc-addons` skill copies `templates/addon` (both tocs, the chat,
+   sound, palette, settings, compartment, and slash skeleton, the test
+   harness, lint, packager, workflows, these docs) and renames every
+   placeholder. The result passes tests, lint, and every check before
+   the one job is written.
 2. Add a row to Members in the skill's `family/FAMILY.md`, then copy
    it to every sibling; CI holds the copies identical.
 3. Add the sibling link to every README footer, every repo.
