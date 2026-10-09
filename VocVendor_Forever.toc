@@ -11,5 +11,7 @@
 ## AddonCompartmentFuncOnLeave: VocVendor_CompartmentLeave
 ## X-Website: https://github.com/vocino/vocvendor
 ## X-License: MIT
+## X-Curse-Project-ID: 1733656
+## X-Wago-ID: ANz7nV64
 
 main.lua
