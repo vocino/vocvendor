@@ -7,6 +7,8 @@
 ## IconTexture: Interface\Icons\INV_Misc_Coin_02
 ## SavedVariables: VocVendorDB
 ## AddonCompartmentFunc: VocVendor_CompartmentClick
+## AddonCompartmentFuncOnEnter: VocVendor_CompartmentEnter
+## AddonCompartmentFuncOnLeave: VocVendor_CompartmentLeave
 ## X-Website: https://github.com/vocino/vocvendor
 ## X-License: MIT
 

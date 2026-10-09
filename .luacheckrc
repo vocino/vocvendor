@@ -19,7 +19,7 @@ globals = {
   "SLASH_VOCVENDOR1", "SLASH_VOCVENDOR2",
   "SlashCmdList",
   "StaticPopupDialogs",
-  "VocVendor_CompartmentClick",
+  "VocVendor_CompartmentClick", "VocVendor_CompartmentEnter", "VocVendor_CompartmentLeave",
 }
 
 -- WoW API and UI globals read by the addon.
@@ -33,9 +33,9 @@ read_globals = {
   "Settings", "MinimalSliderWithSteppersMixin",
   "StaticPopup_Show",
   "Enum",
-  "SOUNDKIT", "PlaySound",
+  "PlaySound", "SOUNDKIT", -- presence-gated; ns.play falls back to numeric IDs
+  "GameTooltip",
   "hooksecurefunc", "strtrim",
-  -- VocDebug guest hook (our own addon, not a Blizzard API)
   -- Pawn (optional guest: never sell what it flags as an upgrade)
   "PawnGetItemData", "PawnIsItemAnUpgrade",
 }

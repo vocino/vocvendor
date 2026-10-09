@@ -100,11 +100,11 @@ local function loadAddon(world)
     return f
   end
   g.GameTooltip = {
-    SetOwner = function() end,
-    SetText = function(_, t) world.gametip.title = t end,
-    AddLine = function(_, t) world.gametip.line = t end,
-    Show = function() end,
-    Hide = function() end,
+    SetOwner = function(_, owner, anchor) world.gametip.owner, world.gametip.anchor = owner, anchor end,
+    SetText = function(_, t, r, gg, b) world.gametip.title = t world.gametip.titleColor = { r, gg, b } end,
+    AddLine = function(_, t) world.gametip.lines[#world.gametip.lines + 1] = t end,
+    Show = function() world.gametip.shown = true end,
+    Hide = function() world.gametip.shown = false end,
   }
   g.StaticPopupDialogs = {}
   g.StaticPopup_Show = function(which, a, b, data)
@@ -162,7 +162,7 @@ local function newWorld()
     bags = {}, slots = {}, minLevels = {}, levels = {}, classIDs = {},
     subclassIDs = {}, rarities = {}, prices = {}, bindTypes = {},
     setIDs = {}, itemIDs = {}, uncached = {}, warbound = {},
-    equipped = {}, printed = {}, frames = {}, gametip = {},
+    equipped = {}, printed = {}, frames = {}, gametip = { lines = {} },
     money = 100000, junkCount = 0, junkValue = 0, junkSold = false,
     sold = {}, repairs = {}, popups = {},
     canRepair = true, repairCost = 0, repairCan = false,
@@ -608,8 +608,23 @@ do
   w.env.SlashCmdList.VOCVENDOR("off")
   check("auto-sell off", ns.opts().autoSell == false)
   check("off announce", w.printed[1] == "|cff66ccffVocVendor|r: auto-sell junk off")
+  check("off confirms with the checkbox pair (fallback: no OFF constant in the stub)",
+    w.playedSounds[1] == 857)
   w.env.SlashCmdList.VOCVENDOR("on")
   check("auto-sell on", ns.opts().autoSell == true)
+  check("on confirms with the SOUNDKIT constant", w.playedSounds[2] == 856)
+  local before = #w.printed
+  w.env.SlashCmdList.VOCVENDOR("help")
+  check("/vv help lists every command", #w.printed == before + 1 + #ns.HELP)
+  check("help names config and help last",
+    ns.HELP[#ns.HELP - 1]:find("^/vv config") ~= nil and ns.HELP[#ns.HELP]:find("^/vv help") ~= nil
+    and ns.HELP[#ns.HELP]:find("/vocvendor works too", 1, true) ~= nil)
+  before = #w.printed
+  w.env.SlashCmdList.VOCVENDOR("onn") -- typo: help, never a toggle
+  check("unknown subcommand prints help", #w.printed == before + 1 + #ns.HELP)
+  check("unknown subcommand never toggles", ns.opts().autoSell == true)
+  check("short and long slash registered",
+    w.env.SLASH_VOCVENDOR1 == "/vv" and w.env.SLASH_VOCVENDOR2 == "/vocvendor")
   w.repairCost = 100
   w.repairCan = true
   w.env.SlashCmdList.VOCVENDOR("repair")
@@ -642,6 +657,33 @@ do
   w.env.VocVendor_CompartmentClick("VocVendor", "LeftButton")
   check("compartment fallback",
     w.printed[#w.printed] == "|cff66ccffVocVendor|r: open Settings > AddOns > VocVendor")
+  -- Hover follows the tooltip contract: gold title, one line, the slash hint.
+  local btn = {}
+  w.env.VocVendor_CompartmentEnter("VocVendor", btn)
+  check("compartment tooltip anchors to the button", w.gametip.owner == btn and w.gametip.shown == true)
+  check("compartment tooltip title is gold", w.gametip.title == "VocVendor"
+    and w.gametip.titleColor[1] == 1 and w.gametip.titleColor[2] == 0.82)
+  check("compartment tooltip teaches the slash", #w.gametip.lines == 2
+    and w.gametip.lines[2]:find("/vv", 1, true) ~= nil)
+  w.env.VocVendor_CompartmentLeave("VocVendor", btn)
+  check("compartment leave hides the tooltip", w.gametip.shown == false)
+end
+
+-- 28b. Settings registration retries at PLAYER_LOGIN when the API was
+-- late, and never registers twice.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  local S = w.env.Settings
+  w.env.Settings = nil
+  clientLoaded(w)
+  check("no Settings at ADDON_LOADED: nothing built", ns.settingsBuilt == false)
+  w.env.Settings = S
+  w.frame.onEvent(nil, "PLAYER_LOGIN")
+  check("PLAYER_LOGIN builds the panel", ns.settingsBuilt == true and w.settingsCategory == "VocVendor")
+  local n = w.settingsChecks
+  w.frame.onEvent(nil, "PLAYER_LOGIN")
+  check("built once", w.settingsChecks == n)
 end
 
 -- 29. Auto-sell confirms with the merchant click, even unannounced.
