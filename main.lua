@@ -21,6 +21,8 @@
 --   Enum.ItemBind.OnEquip (2) = BoE; Enum.ItemQuality.Heirloom (7).
 --   C_Container.UseContainerItem on a bag slot sells the item while a
 --     merchant window is open (the same action as right-clicking it).
+--   C_Container.GetContainerItemEquipmentSetInfo(bag, slot) -> (inSet,
+--     setList) -- the equipment-set safeguard: set gear never sells.
 
 local name, ns = ...
 
@@ -125,14 +127,27 @@ function ns.sellGrays()
   return earned > 0 and earned or 0
 end
 
+-- Equipment-set safeguard: never sell gear in a saved equipment set.
+-- Fail closed: a missing API or a failed call keeps the item, never
+-- sells it.
+function ns.inEquipmentSet(bag, slot)
+  if type(C_Container) ~= "table" then return true end
+  if type(C_Container.GetContainerItemEquipmentSetInfo) ~= "function" then return true end
+  local ok, inSet = pcall(C_Container.GetContainerItemEquipmentSetInfo, bag, slot)
+  if not ok then return true end
+  return inSet == true
+end
+
 -- Sells a candidate list, re-verifying each slot first: bags shift
 -- between the dry-run and the click, and we never sell the wrong item.
+-- Set membership is rechecked too: a slot that joined a set stays put.
 -- Quiet: the caller composes the announcement. Returns count and copper.
 function ns.sellOldGearItems(items)
   local n, value = 0, 0
   if type(C_Container) ~= "table" then return n, value end
   for _, it in ipairs(items or {}) do
-    if C_Container.GetContainerItemLink(it.bag, it.slot) == it.link then
+    if C_Container.GetContainerItemLink(it.bag, it.slot) == it.link
+      and not ns.inEquipmentSet(it.bag, it.slot) then
       local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
       if ok then
         n = n + 1
@@ -395,7 +410,8 @@ function ns.collectOldGear()
     local slots = C_Container.GetContainerNumSlots(bag)
     for slot = 1, slots do
       local link = C_Container.GetContainerItemLink(bag, slot)
-      if link and ns.isOldGear(link, gap) then
+      if link and not ns.inEquipmentSet(bag, slot)
+        and ns.isOldGear(link, gap) then
         local _, _, _, _, _, _, _, _, _, _, sellPrice = C_Item.GetItemInfo(link)
         out[#out + 1] = { link = link, bag = bag, slot = slot,
           price = sellPrice or 0 }
