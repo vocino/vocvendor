@@ -50,7 +50,8 @@ Every change applies at once.
 Grays go through Blizzard's own junk sale, the same call the Sell
 Junk button makes. Old gear is weapons and armor at least the
 configured gap below everything you wear in that slot, never
-heirlooms, never anything Pawn flags as an upgrade when Pawn is
+heirlooms, never anything in a saved equipment set, never anything
+Pawn flags as an upgrade when Pawn is
 installed, and never BoE or Warbound unless you opt them in. Each
 candidate is re-checked by bag slot right before it sells, so a bag
 that shifted between the dry run and the click never sells the wrong

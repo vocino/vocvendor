@@ -38,6 +38,10 @@ local function loadAddon(world)
       world.sold[#world.sold + 1] = { bag = bag, slot = slot }
       return true
     end,
+    -- world.equipSets["bag:slot"] = true marks a slot in a saved set.
+    GetContainerItemEquipmentSetInfo = function(bag, slot)
+      return world.equipSets[bag .. ":" .. slot] == true, ""
+    end,
   }
   g.C_Item = {
     GetItemInfoInstant = function(link)
@@ -161,7 +165,7 @@ local function newWorld()
   return {
     bags = {}, slots = {}, minLevels = {}, levels = {}, classIDs = {},
     subclassIDs = {}, rarities = {}, prices = {}, bindTypes = {},
-    setIDs = {}, itemIDs = {}, uncached = {}, warbound = {},
+    setIDs = {}, itemIDs = {}, uncached = {}, warbound = {}, equipSets = {},
     equipped = {}, printed = {}, frames = {}, gametip = { lines = {} },
     money = 100000, junkCount = 0, junkValue = 0, junkSold = false,
     sold = {}, repairs = {}, popups = {},
@@ -735,6 +739,44 @@ do
   w.env.SlashCmdList.VOCVENDOR("repair")
   check("repair success announces",
     w.printed[4] == "|cff66ccffVocVendor|r: repaired for 1s 0c")
+end
+
+-- 32. Equipment-set safeguard: set gear is never collected, never sold.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local kept = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  local kb, ks = putBag(w, kept)
+  w.equipSets[kb .. ":" .. ks] = true
+  local free = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  local fb, fs = putBag(w, free)
+  local junk = ns.collectJunk()
+  check("set gear excluded from collection", #junk.oldGear == 1)
+  check("free gear still collected", junk.oldGear[1].link == free)
+  local n = ns.sellOldGearItems({
+    { link = kept, bag = kb, slot = ks, price = 1000 },
+    { link = free, bag = fb, slot = fs, price = 1000 },
+  })
+  check("set gear skipped at sell", n == 1 and #w.sold == 1)
+  check("free gear sold", w.sold[1].bag == fb and w.sold[1].slot == fs)
+end
+
+-- 33. Missing or broken equipment-set API keeps old gear (fail closed).
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300 }))
+  w.env.C_Container.GetContainerItemEquipmentSetInfo = nil
+  check("missing API keeps the item", ns.inEquipmentSet(0, 1) == true)
+  check("nothing collected without the API", #ns.collectJunk().oldGear == 0)
+  w.env.C_Container.GetContainerItemEquipmentSetInfo = function() error("boom") end
+  check("erroring API keeps the item", ns.inEquipmentSet(0, 1) == true)
 end
 
 print("ok - " .. passed .. " checks passed")
