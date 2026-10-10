@@ -130,6 +130,7 @@ end
 -- Quiet: the caller composes the announcement. Returns count and copper.
 function ns.sellOldGearItems(items)
   local n, value = 0, 0
+  if type(C_Container) ~= "table" then return n, value end
   for _, it in ipairs(items or {}) do
     if C_Container.GetContainerItemLink(it.bag, it.slot) == it.link then
       local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
