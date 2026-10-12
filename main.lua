@@ -78,6 +78,7 @@ local defaults = {
   oldGearBoE = false,     -- include Bind on Equip in old gear
   oldGearWarbound = false,-- include Warbound in old gear
 }
+ns.defaults = defaults
 
 VocVendorDB = VocVendorDB or {}
 ns.db = VocVendorDB
