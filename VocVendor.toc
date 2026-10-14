@@ -1,4 +1,4 @@
-## Interface: 120100
+## Interface: 120105
 ## Title: VocVendor
 ## Notes: Vendor automation: junk is a configurable definition; auto-sell and auto-repair. (/vv)
 ## Author: vocino
