@@ -164,10 +164,10 @@ function ns.sellOldGearItems(items)
   return n, value
 end
 
-function ns.junkSummary(junk, earned, nOld)
+function ns.junkSummary(grayCount, earned, nOld)
   local parts = {}
-  if junk.grayCount > 0 then
-    parts[#parts + 1] = junk.grayCount .. " junk"
+  if grayCount > 0 then
+    parts[#parts + 1] = grayCount .. " junk"
   end
   if nOld > 0 then
     parts[#parts + 1] = nOld .. " old gear"
@@ -191,7 +191,7 @@ function ns.autoSell()
   local earned = 0
   if junk.grayCount > 0 then earned = ns.sellGrays() end
   local nOld, oldValue = ns.sellOldGearItems(junk.oldGear)
-  local line = ns.junkSummary(junk, earned + oldValue, nOld)
+  local line = ns.junkSummary(junk.grayCount, earned + oldValue, nOld)
   if line then
     ns.sellSound()
     if ns.opts().announce then ns.say(line) end
@@ -313,8 +313,7 @@ function ns.sellJunkNow(data)
   local earned = 0
   if (data.grayCount or 0) > 0 then earned = ns.sellGrays() end
   local nOld, oldValue = ns.sellOldGearItems(data.oldGear)
-  local line = ns.junkSummary(
-      { grayCount = data.grayCount or 0 }, earned + oldValue, nOld)
+  local line = ns.junkSummary(data.grayCount or 0, earned + oldValue, nOld)
   if line then
     ns.sellSound()
     if ns.opts().announce then ns.say(line) end

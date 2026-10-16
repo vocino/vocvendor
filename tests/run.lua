@@ -250,6 +250,16 @@ do
   check("money negative", ns.moneyString(-5) == "0c")
 end
 
+-- 2b. The summary line takes the gray count directly.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  check("summary grays", ns.junkSummary(3, 450, 0) == "sold 3 junk for 4s 50c")
+  check("summary old gear", ns.junkSummary(0, 0, 2) == "sold 2 old gear for 0c")
+  check("summary both", ns.junkSummary(2, 450, 1) == "sold 2 junk, 1 old gear for 4s 50c")
+  check("summary nothing", ns.junkSummary(0, 0, 0) == nil)
+end
+
 -- 3. MERCHANT_SHOW auto-sells junk and announces the take.
 do
   local w = newWorld()
