@@ -12,10 +12,10 @@ skill, then copy it to every repo.
 
 | Addon | Job | Slash | Repo |
 | --- | --- | --- | --- |
-| VocWarbank | Audit the warband bank, bank, and bags; draw the line; clean house | `/vw`, `/vocwarbank` | https://github.com/vocino/vocwarbank |
-| VocGear | Equip bag upgrades out of combat (Pawn weights, or item level without Pawn) | `/vg`, `/vocgear` | https://github.com/vocino/vocgear |
-| VocXP | Session XP/hr and active XP bonuses in one tiny readout | `/vxp`, `/vocxp` | https://github.com/vocino/vocxp |
-| VocVendor | Vendor automation: junk is a configurable definition; auto-sell and auto-repair | `/vv`, `/vocvendor` | https://github.com/vocino/vocvendor |
+| VocWarbank | Clean up your warband bank, bank, and bags; ranks every item: keep, sell, disenchant, vendor, or destroy | `/vw`, `/vocwarbank` | https://github.com/vocino/vocwarbank |
+| VocGear | Auto-equip gear upgrades from your bags out of combat (Pawn stat weights or item level); Great Vault pick helper | `/vg`, `/vocgear` | https://github.com/vocino/vocgear |
+| VocXP | XP bar with XP per hour, time to level, rested XP, and every active XP bonus; reputation at max level | `/vxp`, `/vocxp` | https://github.com/vocino/vocxp |
+| VocVendor | Auto sell junk and auto repair at every vendor, guild funds first; sell old gear too | `/vv`, `/vocvendor` | https://github.com/vocino/vocvendor |
 
 ## Principles
 
