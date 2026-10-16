@@ -88,6 +88,10 @@ function ns.opts()
   for k, v in pairs(defaults) do
     if type(ns.db[k]) ~= type(v) then ns.db[k] = v end
   end
+  -- The slider's own range (Settings panel), enforced here too so a
+  -- hand-edited gap can never make everything (or nothing) "old gear".
+  local gap = ns.db.oldGearIlvlGap
+  if not (gap >= 10 and gap <= 100) then ns.db.oldGearIlvlGap = defaults.oldGearIlvlGap end
   return ns.db
 end
 
@@ -146,6 +150,7 @@ end
 function ns.sellOldGearItems(items)
   local n, value = 0, 0
   if type(C_Container) ~= "table" then return n, value end
+  if type(C_Container.GetContainerItemLink) ~= "function" then return n, value end
   for _, it in ipairs(items or {}) do
     if C_Container.GetContainerItemLink(it.bag, it.slot) == it.link
       and not ns.inEquipmentSet(it.bag, it.slot) then
@@ -211,8 +216,8 @@ function ns.repairNow()
     local okG, canG = pcall(CanGuildBankRepair)
     if okG and canG then
       pcall(RepairAllItems, true)
-      local _, stillCan = GetRepairAllCost()
-      usedGuild = not stillCan
+      local okStill, _, stillCan = pcall(GetRepairAllCost)
+      usedGuild = okStill and not stillCan
       didRepair = usedGuild
     end
   end
