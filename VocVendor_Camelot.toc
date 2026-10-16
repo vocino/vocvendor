@@ -1,6 +1,6 @@
 ## Interface: 16001
 ## Title: VocVendor
-## Notes: Vendor automation: junk is a configurable definition; auto-sell and auto-repair. (/vv)
+## Notes: Auto sell junk and auto repair at every vendor, guild funds first. Sell old gear too, not just grays. (/vv) (Forever client)
 ## Author: vocino
 ## Version: @project-version@
 ## Category: Bags & Inventory
