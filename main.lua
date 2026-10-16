@@ -429,12 +429,6 @@ end
 
 -- Settings
 ns.settingsBuilt = false
-function ns.onSettingChanged(setting, fn)
-  if setting and type(setting.SetValueChangedCallback) == "function" then
-    setting:SetValueChangedCallback(fn)
-  end
-end
-
 function ns.ensureSettings()
   if ns.settingsBuilt then return end
   if type(Settings) ~= "table" then return end
