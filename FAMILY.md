@@ -290,7 +290,7 @@ addon prefix like every other global.
 ```
 <Name>/
   <Name>.toc            Retail metadata (template below)
-  <Name>_Forever.toc    the same, for the Forever client (principle 9)
+  <Name>_Camelot.toc    the same, for the Forever client (principle 9)
   *.lua                 the addon; one file or a few, never a framework
   tests/run.lua         headless tests, run with `lua tests/run.lua`
   README.md             user docs (template below)
@@ -331,9 +331,12 @@ readable in one sitting.
 ## X-Wago-ID: <id>
 ```
 
-`<Name>_Forever.toc` is the same file with the Forever `## Interface`
+`<Name>_Camelot.toc` is the same file with the Forever `## Interface`
 and "(Forever client)" appended to the notes; both list the same Lua
-files. `## Version` is never hand-edited; the packager fills it from
+files. Camelot is the Forever client's own toc suffix (its game-type
+name in Blizzard's TOCs); a `_Forever` suffix is recognized by neither
+the client nor the packager, so releases silently shipped Retail-only
+until the rename. `## Version` is never hand-edited; the packager fills it from
 the tag. Nothing is a `RequiredDeps`: other addons are guests.
 
 ## Tests and lint
