@@ -225,6 +225,20 @@ do
   check("default Warbound excluded", o.oldGearWarbound == false)
 end
 
+-- 1b. An out-of-range gap (hand-edited SavedVariables) resets to the
+-- slider range's default instead of redefining junk wholesale.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.db.oldGearIlvlGap = 5000
+  check("gap above slider range reset", ns.opts().oldGearIlvlGap == 30)
+  ns.db.oldGearIlvlGap = 1
+  check("gap below slider range reset", ns.opts().oldGearIlvlGap == 30)
+  ns.db.oldGearIlvlGap = 45
+  check("gap inside slider range kept", ns.opts().oldGearIlvlGap == 45)
+end
+
 -- 2. Money formatting.
 do
   local w = newWorld()
