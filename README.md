@@ -17,15 +17,19 @@ on Retail and on the Forever client.
 ## Use
 
 Open any vendor. Junk sells, gear repairs (guild funds first when the
-guild allows it), and one chat line reports the take. The native Sell
+guild allows it), and one chat line reports the take. Gear kept for
+disenchanting opens a click-to-disenchant list instead of a chat line:
+click an item to disenchant it. The native Sell
 Junk button keeps working and gains your definition: with old gear in
 it, the click lists the items and asks before selling. The addon
-compartment on the minimap opens the settings.
+compartment on the minimap opens the settings, or the disenchant list
+while kept gear waits.
 
 ```
 /vv            sell junk now
 /vv on|off     auto-sell junk on vendor visits
 /vv repair     repair now
+/vv disenchant open the disenchant list
 /vv config     open Settings > AddOns > VocVendor
 /vv help       this list (/vocvendor works too)
 ```
@@ -42,6 +46,7 @@ Settings > AddOns > VocVendor, or `/vv config`:
 - Old gear ilvl gap (10-100 in 5s, default 30)
 - Also sell Bind on Equip (default off: BoE can sell on the auction house)
 - Also sell Warbound (default off: alts can use it through the warbank)
+- Keep disenchantable gear (default on: enchanters disenchant it from the list instead of selling it)
 
 Every change applies at once.
 
@@ -57,10 +62,13 @@ candidate is re-checked by bag slot right before it sells, so a bag
 that shifted between the dry run and the click never sells the wrong
 item. Repairs mirror the merchant frame's own buttons: guild bank
 first when allowed, your gold otherwise, and only when you can pay.
+Gear kept for disenchanting (uncommon, rare, or epic, for enchanters) opens a
+click-to-disenchant window instead: one row per item, each click
+disenchants that bag slot, and the list tracks the bags until empty.
 
 ## What's inside
 
-- `main.lua`: the whole addon: the junk definition, auto-sell, auto-repair, the Sell Junk hook, settings, slash
+- `main.lua`: the whole addon: the junk definition, auto-sell, auto-repair, the Sell Junk hook, the disenchant window, settings, slash
 - `VocVendor.toc` / `VocVendor_Camelot.toc`: metadata for Retail and the Forever client
 - `tests/run.lua`: stub-harness regression tests, no WoW client needed
 

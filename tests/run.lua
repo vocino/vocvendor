@@ -25,7 +25,7 @@ local function loadAddon(world)
   g.NUM_BAG_SLOTS = 4
   g.Enum = {
     ItemClass = { Weapon = 2, Armor = 4 },
-    ItemQuality = { Heirloom = 7, Epic = 4 },
+    ItemQuality = { Poor = 0, Common = 1, Uncommon = 2, Rare = 3, Epic = 4, Heirloom = 7 },
     ItemBind = { OnEquip = 2, OnAcquire = 1 },
   }
   g.C_Container = {
@@ -41,6 +41,13 @@ local function loadAddon(world)
     -- world.equipSets["bag:slot"] = true marks a slot in a saved set.
     GetContainerItemEquipmentSetInfo = function(bag, slot)
       return world.equipSets[bag .. ":" .. slot] == true, ""
+    end,
+    -- world.noValues["bag:slot"] = true marks a slot the vendor will not
+    -- buy (C_Container.GetContainerItemInfo reports hasNoValue there).
+    -- world.noContainerInfo simulates a client without that API.
+    GetContainerItemInfo = function(bag, slot)
+      if world.noContainerInfo then return nil end
+      return { hasNoValue = world.noValues[bag .. ":" .. slot] == true }
     end,
   }
   g.C_Item = {
@@ -64,6 +71,9 @@ local function loadAddon(world)
       world.junkSold = true
       world.money = world.money + world.junkValue
     end,
+  }
+  g.C_SpellBook = {
+    ContainsAnyDisenchantSpell = function() return world.canDE == true end,
   }
   g.GetMoney = function() return world.money end
   g.GetInventoryItemLink = function(_, slotID) return world.equipped[slotID] end
@@ -93,13 +103,84 @@ local function loadAddon(world)
     SetEnabled = function(_, e) world.buttonEnabled = e end,
   }
   g.hooksecurefunc = function(n, fn) world.hooks[n] = fn end
-  g.CreateFrame = function(ftype)
-    local f = { events = {}, scripts = {}, ctype = ftype }
+  g.UIParent = {}
+  g.UISpecialFrames = {}
+  g.InCombatLockdown = function() return world.combat == true end
+  g.IsMouseButtonDown = function() return false end
+  g.C_Spell = {
+    GetSpellName = function(spellID) return world.deSpellName end,
+  }
+  local function makeFrame(ftype, fname, template)
+    local f = { events = {}, scripts = {}, attrs = {}, ctype = ftype,
+      cname = fname, ctemplate = template, shown = false }
     f.RegisterEvent = function(_, e) f.events[e] = true end
     f.SetScript = function(_, n, fn) f.scripts[n] = fn end
+    f.GetScript = function(_, n) return f.scripts[n] end
+    f.HookScript = function(_, n, fn)
+      local prev = f.scripts[n]
+      f.scripts[n] = function(...)
+        if prev then prev(...) end
+        return fn(...)
+      end
+    end
+    f.SetAttribute = function(_, n, v) f.attrs[n] = v end
+    f.GetAttribute = function(_, n) return f.attrs[n] end
+    f.RegisterForClicks = function() end
     f.SetText = function(_, t) f.text = t end
     f.SetSize = function(_, w, h) f.size = { w, h } end
     f.SetPoint = function(_, ...) f.point = { ... } end
+    f.ClearAllPoints = function() f.cleared = true end
+    f.SetMovable = function() end
+    f.EnableMouse = function() end
+    f.RegisterForDrag = function() end
+    f.StartMoving = function() end
+    f.StopMovingOrSizing = function() end
+    f.Show = function() f.shown = true end
+    f.Hide = function()
+      f.shown = false
+      if f.scripts.OnHide then f.scripts.OnHide(f) end
+    end
+    f.IsShown = function() return f.shown end
+    f.CreateFontString = function()
+      local fs = {}
+      fs.SetPoint = function() end
+      fs.SetText = function(_, t) fs.text = t end
+      fs.SetTextColor = function() end
+      fs.Show = function() end
+      fs.Hide = function() end
+      return fs
+    end
+    f.CreateTexture = function()
+      local tx = {}
+      tx.SetSize = function() end
+      tx.SetPoint = function() end
+      tx.SetAllPoints = function() end
+      tx.SetTexture = function(_, t) tx.texture = t end
+      tx.Show = function() tx.hidden = false end
+      tx.Hide = function() tx.hidden = true end
+      return tx
+    end
+    -- BasicFrameTemplateWithInset ships TitleText and CloseButton.
+    if type(template) == "string"
+      and template:find("BasicFrameTemplateWithInset", 1, true) then
+      f.TitleText = { SetText = function(_, t) f.title = t end }
+      f.CloseButton = {
+        SetScript = function(_, n, fn)
+          f.closeScripts = f.closeScripts or {}
+          f.closeScripts[n] = fn
+        end,
+        SetPoint = function() end,
+      }
+    end
+    return f
+  end
+  g.CreateFrame = function(ftype, fname, parent, template)
+    if ftype == "Button" and type(template) == "string"
+      and template:find("SecureActionButtonTemplate", 1, true)
+      and world.noSecure then
+      return nil -- client without secure buttons: the window stays shut
+    end
+    local f = makeFrame(ftype, fname, template)
     world.frames[#world.frames + 1] = f
     return f
   end
@@ -109,6 +190,7 @@ local function loadAddon(world)
     AddLine = function(_, t) world.gametip.lines[#world.gametip.lines + 1] = t end,
     Show = function() world.gametip.shown = true end,
     Hide = function() world.gametip.shown = false end,
+    SetHyperlink = function(_, link) world.gametip.link = link end,
   }
   g.StaticPopupDialogs = {}
   g.StaticPopup_Show = function(which, a, b, data)
@@ -171,11 +253,12 @@ local function newWorld()
     sold = {}, repairs = {}, popups = {},
     canRepair = true, repairCost = 0, repairCan = false,
     guildRepair = false, guildCovers = true,
-    merchantOpen = true, withPawn = false, pawnUpgrades = {},
+    merchantOpen = true, withPawn = false, pawnUpgrades = {}, canDE = false,
     settingsReg = {}, settingsChecks = 0, settingsSliders = 0,
     settingsCategory = nil, savedVars = nil,
     blizzClicked = false, hookedClick = {}, hooks = {}, buttonEnabled = nil,
-    playedSounds = {},
+    playedSounds = {}, noValues = {},
+    combat = false, deSpellName = "Disenchant", noSecure = false,
   }
 end
 
@@ -223,6 +306,7 @@ do
   check("default gap", o.oldGearIlvlGap == 30)
   check("default BoE excluded", o.oldGearBoE == false)
   check("default Warbound excluded", o.oldGearWarbound == false)
+  check("default keep disenchantable", o.keepDisenchantable == true)
 end
 
 -- 1b. An out-of-range gap (hand-edited SavedVariables) resets to the
@@ -668,7 +752,9 @@ do
   check("autoSell setting", w.env.Settings and w.settingsReg["VocVendor_autoSell"] ~= nil)
   check("gap slider", w.settingsSliders == 1)
   check("gap default", w.settingsReg["VocVendor_oldGearIlvlGap"].default == 30)
-  check("checkboxes", w.settingsChecks == 7)
+  check("checkboxes", w.settingsChecks == 8)
+  check("keep disenchantable setting", w.settingsReg["VocVendor_keepDisenchantable"] ~= nil)
+  check("keep default", w.settingsReg["VocVendor_keepDisenchantable"].default == true)
 end
 
 -- 28. Compartment click opens the addon's Settings category.
@@ -801,6 +887,399 @@ do
   check("nothing collected without the API", #ns.collectJunk().oldGear == 0)
   w.env.C_Container.GetContainerItemEquipmentSetInfo = function() error("boom") end
   check("erroring API keeps the item", ns.inEquipmentSet(0, 1) == true)
+end
+
+-- 34. Enchanter with the toggle on: DE-able old gear is kept, not sold.
+do
+  local w = newWorld()
+  w.canDE = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local old = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  putBag(w, old)
+  check("DE-able old gear excluded", ns.isOldGear(old, 30) == false)
+  check("ignoring DE it qualifies", ns.isOldGear(old, 30, true) == true)
+  check("kept line", ns.keptLine(ns.collectKeptDisenchantables()) == "kept 1 for disenchant")
+  check("no kept line when empty", ns.keptLine({}) == nil)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("kept gear not sold", #w.sold == 0)
+  check("window opened for kept gear", ns.deWindow ~= nil and ns.deWindow:IsShown())
+  check("one row for one kept item", #ns.deRows == 1)
+  check("row holds the kept link", ns.deRows[1].deLink == old)
+  check("no kept chat: the window is the notice", #w.printed == 0)
+  check("window confirms open", w.playedSounds[1] == 850)
+end
+
+-- 35. Toggle off: the same gear sells like any other old gear.
+do
+  local w = newWorld()
+  w.canDE = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  ns.opts().keepDisenchantable = false
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  check("nothing kept when toggled off", #ns.collectKeptDisenchantables() == 0)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("old gear sold when toggled off", #w.sold == 1)
+  check("sold announce, no kept line",
+    #w.printed == 1 and w.printed[1] == "|cff66ccffVocVendor|r: sold 1 old gear for 10s 0c")
+  check("no disenchant window without kept gear",
+    ns.deWindow == nil or not ns.deWindow:IsShown())
+end
+
+-- 36. Non-enchanter: the toggle is inert, sales unchanged.
+do
+  local w = newWorld()
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  check("not an enchanter", ns.canDisenchant() == false)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  check("nothing kept for non-enchanter", #ns.collectKeptDisenchantables() == 0)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("old gear still sells", #w.sold == 1)
+  check("no kept line", #w.printed == 1)
+  check("no disenchant window for non-enchanters",
+    ns.deWindow == nil or not ns.deWindow:IsShown())
+end
+
+-- 37. Missing or broken spellbook API keeps selling (fail closed).
+do
+  local w = newWorld()
+  w.canDE = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300 }))
+  w.env.C_SpellBook = nil
+  check("missing API is not an enchanter", ns.canDisenchant() == false)
+  check("missing API keeps nothing", #ns.collectKeptDisenchantables() == 0)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("missing API still sells", #w.sold == 1)
+end
+do
+  local w = newWorld()
+  w.canDE = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300 }))
+  w.env.C_SpellBook = { ContainsAnyDisenchantSpell = function() error("boom") end }
+  check("erroring API is not an enchanter", ns.canDisenchant() == false)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("erroring API still sells", #w.sold == 1)
+end
+
+-- 38. Disenchantable heuristic: uncommon, rare, or epic weapons/armor only.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local epic = gear(w, { slot = "INVTYPE_HEAD", level = 300 })
+  local rare = gear(w, { slot = "INVTYPE_HEAD", level = 300, rarity = 3 })
+  local common = gear(w, { slot = "INVTYPE_HEAD", level = 300, rarity = 1 })
+  local heir = gear(w, { slot = "INVTYPE_HEAD", level = 300, rarity = 7 })
+  local noprice = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 0 })
+  local ghost = gear(w, { slot = "INVTYPE_HEAD", level = 300 })
+  w.uncached[ghost] = true
+  local potion = gear(w, { slot = "INVTYPE_HEAD", level = 300, classID = 0 })
+  local tool = gear(w, { slot = "", level = 300 })
+  check("epic disenchantable", ns.isDisenchantable(epic) == true)
+  check("rare disenchantable", ns.isDisenchantable(rare) == true)
+  check("common is not", ns.isDisenchantable(common) == false)
+  check("heirloom is not", ns.isDisenchantable(heir) == false)
+  check("no price is not", ns.isDisenchantable(noprice) == false)
+  check("uncached is not", ns.isDisenchantable(ghost) == false)
+  check("non gear is not", ns.isDisenchantable(potion) == false)
+  check("no equip loc is not", ns.isDisenchantable(tool) == false)
+end
+
+-- 39. Manual sale with only kept gear: answers kept, runs no sale.
+do
+  local w = newWorld()
+  w.canDE = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  ns.opts().autoSell = false
+  ns.opts().autoRepair = false
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300 }))
+  w.frame.onEvent(nil, "MERCHANT_SHOW") -- installs the button hook
+  w.env.SlashCmdList.VOCVENDOR("")
+  check("manual kept opens the window", ns.deWindow ~= nil and ns.deWindow:IsShown())
+  check("manual kept lists the item", #ns.deRows == 1)
+  check("no kept chat on manual sale", #w.printed == 0)
+  check("native click skipped when only kept", w.blizzClicked == false)
+  check("no popup when only kept", #w.popups == 0)
+end
+
+-- 40. Dry-run mixes: common old gear sells, epic old gear is kept.
+do
+  local w = newWorld()
+  w.canDE = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  ns.opts().autoSell = false
+  ns.opts().autoRepair = false
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local commonOld = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1200, rarity = 1 })
+  putBag(w, commonOld)
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 800 }))
+  w.frame.onEvent(nil, "MERCHANT_SHOW") -- installs the button hook
+  w.hookedClick.OnClick(w.env.MerchantSellAllJunkButton)
+  check("dry-run sells only the common",
+    w.printed[1] == "|cff66ccffVocVendor|r: junk to sell (0 gray, 1 old gear):")
+  check("dry-run lists the common", w.printed[2] == "  " .. commonOld)
+  check("dry-run opens the disenchant window", ns.deWindow ~= nil and ns.deWindow:IsShown())
+  check("window lists only the kept epic", #ns.deRows == 1)
+  check("no kept chat beside the window", #w.printed == 2)
+  check("one popup for the common", #w.popups == 1 and w.popups[1].a == 1)
+  check("popup totals the common", w.popups[1].b == "12s 0c")
+  check("blizzard click skipped", w.blizzClicked == false)
+end
+
+-- 41. Popup confirm also reports what was kept.
+do
+  local w = newWorld()
+  w.canDE = true
+  w.junkCount = 2
+  w.junkValue = 450
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300 }))
+  ns.sellJunkNow({ grayCount = 2, oldGear = {} })
+  check("confirm sold line first",
+    w.printed[1] == "|cff66ccffVocVendor|r: sold 2 junk for 4s 50c")
+  check("confirm opens the window for kept gear",
+    ns.deWindow ~= nil and ns.deWindow:IsShown())
+  check("confirm lists the kept item", #ns.deRows == 1)
+end
+
+-- 42. Row click arms a Disenchant macro for the item's slot, then clears.
+do
+  local w = newWorld()
+  w.canDE = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  ns.opts().announce = false -- the window opens regardless of announce
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local old = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  putBag(w, old)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("window opens unannounced", ns.deWindow:IsShown() and #w.printed == 0)
+  check("row shows the kept link", ns.deRows[1].text.text == old)
+  local row = ns.deRows[1]
+  row.scripts.PreClick(row, "LeftButton", true)
+  check("row arms a macro", row.attrs.type == "macro")
+  check("macro casts Disenchant on the slot",
+    row.attrs.macrotext == "/cast Disenchant\n/use 0 1")
+  row.scripts.PostClick(row)
+  check("macro cleared after click", row.attrs.type == nil)
+  row.scripts.OnClick(row, "LeftButton", false)
+  check("row click confirms with sound", w.playedSounds[#w.playedSounds] == 856)
+end
+
+-- 43. Stale slots re-resolve by link; vanished links disarm the click.
+do
+  local w = newWorld()
+  w.canDE = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local old = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  putBag(w, old)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  local row = ns.deRows[1]
+  -- Bag shifted: another item sits in slot 1, the kept item in slot 2.
+  local other = gear(w, { slot = "INVTYPE_HEAD", level = 399 })
+  w.bags[0][1] = other
+  w.bags[0][2] = old
+  row.scripts.PreClick(row, "LeftButton", true)
+  check("click follows the link", row.attrs.macrotext == "/cast Disenchant\n/use 0 2")
+  w.bags[0][2] = other -- the kept item left the bags entirely
+  row.scripts.PreClick(row, "LeftButton", true)
+  check("vanished link disarms the click", row.attrs.type == nil)
+end
+
+-- 44. Bag updates empty the list: disenchant everything, window closes.
+do
+  local w = newWorld()
+  w.canDE = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("window open before disenchanting", ns.deWindow:IsShown())
+  check("bag update registered", w.frame.events.BAG_UPDATE == true)
+  w.bags[0] = {} -- the item is disenchanted: gone from the bags
+  w.frame.onEvent(nil, "BAG_UPDATE")
+  check("window closes when emptied", not ns.deWindow:IsShown())
+  check("close confirms", w.playedSounds[#w.playedSounds] == 851)
+end
+
+-- 45. Slash reopens the list anywhere; empty bags answer instead.
+do
+  local w = newWorld()
+  w.canDE = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  w.env.SlashCmdList.VOCVENDOR("disenchant")
+  check("slash opens the list", ns.deWindow:IsShown() and #ns.deRows == 1)
+  w.bags[0] = {}
+  if ns.deWindow:IsShown() then ns.deWindow:Hide() end
+  w.playedSounds = {}
+  w.env.SlashCmdList.VOCVENDOR("disenchant")
+  check("empty list answers",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: nothing to disenchant")
+  check("help lists disenchant",
+    table.concat(ns.HELP, "\n"):find("/vv disenchant", 1, true) ~= nil)
+end
+
+-- 46. No secure buttons: the kept report falls back to chat.
+do
+  local w = newWorld()
+  w.canDE = true
+  w.repairCan = false
+  w.noSecure = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("fallback chat", w.printed[1] == "|cff66ccffVocVendor|r: kept 1 for disenchant")
+  check("no rows without secure buttons", #ns.deRows == 0)
+end
+
+-- 47. Combat: clicks arm nothing, the list stays put.
+do
+  local w = newWorld()
+  w.canDE = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  local row = ns.deRows[1]
+  w.combat = true
+  row.scripts.PreClick(row, "LeftButton", true)
+  check("combat click arms nothing", row.attrs.type == nil)
+  check("combat click says so",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: can't disenchant during combat")
+  w.frame.onEvent(nil, "BAG_UPDATE") -- combat refresh leaves the list alone
+  check("combat bag update keeps the list", ns.deWindow:IsShown())
+  check("combat show falls back to chat",
+    ns.refreshDEWindow(ns.collectKeptDisenchantables()) == nil)
+end
+
+-- 48. Compartment click opens the list while kept gear waits.
+do
+  local w = newWorld()
+  w.canDE = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  local opened = nil
+  w.env.Settings.OpenToCategory = function(id) opened = id end
+  w.env.VocVendor_CompartmentClick("VocVendor", "LeftButton")
+  check("compartment opens the list", ns.deWindow:IsShown())
+  check("compartment skips settings when items wait", opened == nil)
+  w.bags[0] = {}
+  if ns.deWindow:IsShown() then ns.deWindow:Hide() end
+  w.env.VocVendor_CompartmentClick("VocVendor", "LeftButton")
+  check("compartment opens settings when empty", opened == 7)
+end
+
+-- 49. Legendary and artifact gear is never listed for disenchant: the
+-- Disenchant spell targets uncommon, rare, and epic weapons/armor only.
+-- (Screenshot regression: artifact weapons opened the disenchant list.)
+do
+  local w = newWorld()
+  w.canDE = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local legendary = gear(w, { slot = "INVTYPE_HEAD", level = 300, rarity = 5 })
+  local artifact = gear(w, { slot = "INVTYPE_HEAD", level = 300, rarity = 6 })
+  local epic = gear(w, { slot = "INVTYPE_HEAD", level = 300, rarity = 4 })
+  check("legendary is not disenchantable", ns.isDisenchantable(legendary) == false)
+  check("artifact is not disenchantable", ns.isDisenchantable(artifact) == false)
+  check("epic still is", ns.isDisenchantable(epic) == true)
+  putBag(w, artifact)
+  putBag(w, legendary)
+  check("no artifact or legendary kept for disenchant",
+    #ns.collectKeptDisenchantables() == 0)
+  check("artifact and legendary sell as old gear",
+    #ns.collectJunk().oldGear == 2)
+end
+
+-- 50. Slots the vendor will not buy are never collected or sold.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local refused = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  local rb, rs = putBag(w, refused)
+  w.noValues[rb .. ":" .. rs] = true
+  local wanted = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  local wb, ws = putBag(w, wanted)
+  check("slot without value detected", ns.slotHasValue(rb, rs) == false)
+  check("slot with value detected", ns.slotHasValue(wb, ws) == true)
+  local junk = ns.collectJunk()
+  check("refused slot not collected",
+    #junk.oldGear == 1 and junk.oldGear[1].link == wanted)
+  local n = ns.sellOldGearItems({
+    { link = refused, bag = rb, slot = rs, price = 1000 },
+    { link = wanted, bag = wb, slot = ws, price = 1000 },
+  })
+  check("refused slot not sold at confirm", n == 1 and #w.sold == 1)
+  check("wanted slot sold", w.sold[1].bag == wb and w.sold[1].slot == ws)
+end
+
+-- 51. Missing container value API keeps old gear (fail closed).
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300 }))
+  w.noContainerInfo = true -- GetContainerItemInfo returns nothing
+  check("missing value API keeps the item", ns.slotHasValue(0, 1) == false)
+  check("nothing collected without the API", #ns.collectJunk().oldGear == 0)
 end
 
 print("ok - " .. passed .. " checks passed")
