@@ -3,7 +3,8 @@
 ## Code Map
 
 - `main.lua`: the whole addon: the junk definition, auto-sell,
-  auto-repair, the native Sell Junk hook, Settings panel, slash
+  auto-repair, the native Sell Junk hook, the disenchant window,
+  Settings panel, slash
 - `VocVendor.toc` / `VocVendor_Camelot.toc`: addon metadata (dual toc,
   shared `main.lua`; no `RequiredDeps`)
 - `tests/run.lua`: stub-harness regression tests (`lua tests/run.lua`)

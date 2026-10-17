@@ -2,7 +2,8 @@
 -- configurable definition, not a fixed pile of grays. The definition
 -- drives both triggers: auto-sell on every vendor visit, and the
 -- merchant frame's own Sell Junk button (which we enhance, not
--- replace).
+-- replace). Gear kept for disenchanting opens a click-to-disenchant
+-- window instead of a chat line.
 --
 -- Sources of truth (verified against the live 12.x client, see AGENTS.md):
 --   C_MerchantFrame.SellAllJunkItems / GetNumJunkItems -- Blizzard's own
@@ -15,6 +16,13 @@
 --     (MerchantFrame.xml guild-bank repair button).
 --   C_Item.IsItemBindToAccountUntilEquip -- Warbound detection (used by
 --     Blizzard's own MerchantFrame.lua).
+--   C_SpellBook.ContainsAnyDisenchantSpell -- enchanter gate: true when
+--     the player knows any Disenchant spell.
+--   C_Spell.GetSpellName -- localized Disenchant for the disenchant
+--     window's row macros (tainted calls allowed).
+--   InCombatLockdown, IsMouseButtonDown, UIParent, UISpecialFrames,
+--     BasicFrameTemplateWithInset, SecureActionButtonTemplate --
+--     FrameXML technique shared with VocWarbank (presence-gated).
 --   C_Item.GetItemInfo returns, in order: name, link, quality, level,
 --     minLevel, type, subType, stackCount, equipLoc, texture, sellPrice(11),
 --     classID(12), subclassID(13), bindType(14), ... (ItemDocumentation).
@@ -77,6 +85,7 @@ local defaults = {
   oldGearIlvlGap = 30,    -- ...when this far below equipped
   oldGearBoE = false,     -- include Bind on Equip in old gear
   oldGearWarbound = false,-- include Warbound in old gear
+  keepDisenchantable = true, -- keep gear you could disenchant
 }
 ns.defaults = defaults
 
@@ -145,7 +154,8 @@ end
 
 -- Sells a candidate list, re-verifying each slot first: bags shift
 -- between the dry-run and the click, and we never sell the wrong item.
--- Set membership is rechecked too: a slot that joined a set stays put.
+-- Set membership and vendor value are rechecked too: a slot that joined
+-- a set, or that the vendor won't buy, stays put.
 -- Quiet: the caller composes the announcement. Returns count and copper.
 function ns.sellOldGearItems(items)
   local n, value = 0, 0
@@ -153,7 +163,8 @@ function ns.sellOldGearItems(items)
   if type(C_Container.GetContainerItemLink) ~= "function" then return n, value end
   for _, it in ipairs(items or {}) do
     if C_Container.GetContainerItemLink(it.bag, it.slot) == it.link
-      and not ns.inEquipmentSet(it.bag, it.slot) then
+      and not ns.inEquipmentSet(it.bag, it.slot)
+      and ns.slotHasValue(it.bag, it.slot) then
       local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
       if ok then
         n = n + 1
@@ -177,6 +188,12 @@ function ns.junkSummary(grayCount, earned, nOld)
     .. ns.moneyString(earned)
 end
 
+-- Kept-for-disenchant report: nil when nothing was kept.
+function ns.keptLine(kept)
+  if not kept or #kept == 0 then return nil end
+  return "kept " .. #kept .. " for disenchant"
+end
+
 -- Sale confirmation, independent of the announce toggle: sound confirms
 -- the action, chat reports it.
 function ns.sellSound()
@@ -187,8 +204,10 @@ end
 -- opted into every part of it via settings.
 function ns.autoSell()
   local junk = ns.collectJunk()
-  if junk.grayCount == 0 and #junk.oldGear == 0 then return end
+  local kept = ns.collectKeptDisenchantables()
+  if junk.grayCount == 0 and #junk.oldGear == 0 and #kept == 0 then return end
   local earned = 0
+  ns.reportKept(kept)
   if junk.grayCount > 0 then earned = ns.sellGrays() end
   local nOld, oldValue = ns.sellOldGearItems(junk.oldGear)
   local line = ns.junkSummary(junk.grayCount, earned + oldValue, nOld)
@@ -286,9 +305,14 @@ end
 -- old gear goes through the itemized dry-run first. Grays alone keep
 -- Blizzard's original click and popup.
 function ns.onJunkButtonClick(button)
+  local kept = ns.collectKeptDisenchantables()
   local junk = ns.collectJunk()
   if junk.grayCount == 0 and #junk.oldGear == 0 then
-    ns.say("nothing to sell")
+    if #kept > 0 then
+      ns.reportKept(kept, true)
+    else
+      ns.say("nothing to sell")
+    end
     return
   end
   if #junk.oldGear == 0 then
@@ -305,12 +329,14 @@ function ns.onJunkButtonClick(button)
   StaticPopup_Show("VOCVENDOR_SELL_JUNK",
     junk.grayCount + #junk.oldGear, ns.moneyString(total),
     { grayCount = junk.grayCount, oldGear = junk.oldGear })
+  ns.reportKept(kept, true)
 end
 
 -- Confirm handler for the dry-run popup: sells the configured junk.
 function ns.sellJunkNow(data)
   data = data or {}
   local earned = 0
+  ns.reportKept(ns.collectKeptDisenchantables())
   if (data.grayCount or 0) > 0 then earned = ns.sellGrays() end
   local nOld, oldValue = ns.sellOldGearItems(data.oldGear)
   local line = ns.junkSummary(data.grayCount or 0, earned + oldValue, nOld)
@@ -351,6 +377,49 @@ function ns.isWarbound(link)
   return ok and warbound == true
 end
 
+-- Enchanter gate: true when the player knows any Disenchant spell.
+-- Presence-gated and fail closed: without the API nothing counts as
+-- kept for disenchanting, so sales behave as if the toggle were off.
+function ns.canDisenchant()
+  if type(C_SpellBook) ~= "table" then return false end
+  if type(C_SpellBook.ContainsAnyDisenchantSpell) ~= "function" then return false end
+  local ok, knows = pcall(C_SpellBook.ContainsAnyDisenchantSpell)
+  return ok and knows == true
+end
+
+-- Per-slot vendor truth: Blizzard's own container info flags the slots no
+-- merchant will buy (hasNoValue). The static GetItemInfo price alone lists
+-- items the vendor refuses, so collection and the sell click both check the
+-- slot. Fail closed: a missing API or a failed call keeps the item, never
+-- sells it.
+function ns.slotHasValue(bag, slot)
+  if type(C_Container) ~= "table" then return false end
+  if type(C_Container.GetContainerItemInfo) ~= "function" then return false end
+  local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+  if not ok or type(info) ~= "table" then return false end
+  return info.hasNoValue == false
+end
+
+-- Heuristic for "rather disenchant than sell": uncommon, rare, or epic
+-- weapons/armor with a vendor price. Anything the Disenchant spell cannot
+-- target stays out of the list. Uncached items fail closed, like every
+-- other unknown in this file.
+function ns.isDisenchantable(link)
+  local _, _, _, equipLoc, _, classID = C_Item.GetItemInfoInstant(link)
+  if not equipLoc or equipLoc == "" then return false end
+  if classID ~= Enum.ItemClass.Weapon and classID ~= Enum.ItemClass.Armor then
+    return false
+  end
+  local _, _, quality, _, _, _, _, _, _, _, sellPrice = C_Item.GetItemInfo(link)
+  if not quality then return false end
+  if not sellPrice or sellPrice == 0 then return false end
+  -- Uncommon, rare, or epic only: the Disenchant spell cannot target
+  -- legendary, artifact, or heirloom gear (nor commons).
+  return quality == Enum.ItemQuality.Uncommon
+    or quality == Enum.ItemQuality.Rare
+    or quality == Enum.ItemQuality.Epic
+end
+
 -- Pawn guest: never sell what Pawn flags as an upgrade. Pawn API verified
 -- against Pawn's current source (see VocGear's .reference/pawn-analysis.md):
 -- PawnGetItemData(link) -> item table; PawnIsItemAnUpgrade(item) -> entries.
@@ -372,8 +441,9 @@ end
 
 -- True when the bag item is weapons/armor gear at least `gap` item levels
 -- below everything equipped in its slot(s), passing the exclusion
--- filters. Uncached items are skipped rather than guessed about.
-function ns.isOldGear(link, gap)
+-- filters. Gear kept for disenchanting never qualifies (unless
+-- ignoreDE). Uncached items are skipped rather than guessed about.
+function ns.isOldGear(link, gap, ignoreDE)
   local _, _, _, equipLoc, _, classID = C_Item.GetItemInfoInstant(link)
   if not equipLoc or equipLoc == "" then return false end
   if classID ~= Enum.ItemClass.Weapon and classID ~= Enum.ItemClass.Armor then
@@ -387,6 +457,10 @@ function ns.isOldGear(link, gap)
   local o = ns.opts()
   if bindType == Enum.ItemBind.OnEquip and not o.oldGearBoE then return false end
   if ns.isWarbound(link) and not o.oldGearWarbound then return false end
+  if not ignoreDE and o.keepDisenchantable
+    and ns.canDisenchant() and ns.isDisenchantable(link) then
+    return false
+  end
   if ns.pawnSaysUpgrade(link) then return false end
   local slots = ns.slotPairs[equipLoc] or { ns.primarySlot[equipLoc] }
   local candLevel = C_Item.GetDetailedItemLevelInfo(link)
@@ -416,6 +490,7 @@ function ns.collectOldGear()
     for slot = 1, slots do
       local link = C_Container.GetContainerItemLink(bag, slot)
       if link and not ns.inEquipmentSet(bag, slot)
+        and ns.slotHasValue(bag, slot)
         and ns.isOldGear(link, gap) then
         local _, _, _, _, _, _, _, _, _, _, sellPrice = C_Item.GetItemInfo(link)
         out[#out + 1] = { link = link, bag = bag, slot = slot,
@@ -424,6 +499,254 @@ function ns.collectOldGear()
     end
   end
   return out
+end
+
+-- Gear kept for disenchanting: items that would be old gear but for the
+-- disenchant exclusion. Only non-empty when old gear is junk, the toggle
+-- is on, and the player can disenchant; everyone else skips the scan.
+function ns.collectKeptDisenchantables()
+  local o = ns.opts()
+  if not o.junkOldGear then return {} end
+  if not o.keepDisenchantable then return {} end
+  if not ns.canDisenchant() then return {} end
+  local gap = o.oldGearIlvlGap or 30
+  local out = {}
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      local link = C_Container.GetContainerItemLink(bag, slot)
+      if link and not ns.inEquipmentSet(bag, slot)
+        and ns.isOldGear(link, gap, true)
+        and ns.isDisenchantable(link) then
+        out[#out + 1] = { link = link, bag = bag, slot = slot }
+      end
+    end
+  end
+  return out
+end
+
+-- Disenchant window. Gear kept out of junk sales for disenchanting is
+-- actionable, not a chat line: after every sale the kept list opens
+-- here, one row per item, and clicking a row disenchants that bag slot.
+--
+-- Each row is a secure action button (the same path Blizzard's own
+-- macros take, and the same technique VocWarbank's in-person
+-- disenchant button uses): PreClick writes a "/cast <Disenchant> /use
+-- bag slot" macro for the row's item, the template's own OnClick runs
+-- it, PostClick clears it. One item per click: a cast is in flight
+-- after each. Attributes cannot change in combat, so a combat click
+-- arms nothing and says so instead.
+--
+-- The Disenchant spell ID is the one VocWarbank resolves.
+ns.DE_SPELL = 13262
+ns.deWindow = nil
+ns.deRows = {}
+
+-- Localized Disenchant name for the row macros, nil when the client
+-- has no such spell. Presence-gated: no spell API, no window.
+function ns.deSpellName()
+  if type(C_Spell) ~= "table" then return nil end
+  if type(C_Spell.GetSpellName) ~= "function" then return nil end
+  local ok, spellName = pcall(C_Spell.GetSpellName, ns.DE_SPELL)
+  if not ok or type(spellName) ~= "string" or spellName == "" then return nil end
+  return spellName
+end
+
+-- Current bag slot holding the link, skipping equipment sets. Bag
+-- slots shift after every sale and every disenchant, so a row
+-- re-resolves its link on every click instead of trusting its seat.
+function ns.findKeptSlot(link)
+  if type(C_Container) ~= "table" then return nil end
+  if type(C_Container.GetContainerItemLink) ~= "function" then return nil end
+  if type(C_Container.GetContainerNumSlots) ~= "function" then return nil end
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      if C_Container.GetContainerItemLink(bag, slot) == link
+        and not ns.inEquipmentSet(bag, slot) then
+        return bag, slot
+      end
+    end
+  end
+  return nil
+end
+
+-- PreClick: arm this row's macro for its item's current slot. A slot
+-- that drifted since the list was built is re-resolved by link; a
+-- link that is gone (disenchanted, banked) disarms the click.
+local function armDE(row, _, down)
+  if type(InCombatLockdown) == "function" and InCombatLockdown() then
+    if down then ns.say("can't disenchant during combat") end
+    return
+  end
+  local spell = ns.deSpellName()
+  if not spell then row:SetAttribute("type", nil) return end
+  local bag, slot = row.deBag, row.deSlot
+  local same = bag ~= nil and slot ~= nil
+    and type(C_Container) == "table"
+    and type(C_Container.GetContainerItemLink) == "function"
+    and C_Container.GetContainerItemLink(bag, slot) == row.deLink
+  if not same then bag, slot = ns.findKeptSlot(row.deLink) end
+  if not bag then row:SetAttribute("type", nil) return end
+  row.deBag, row.deSlot = bag, slot
+  row:SetAttribute("type", "macro")
+  row:SetAttribute("macrotext",
+    "/cast " .. spell .. "\n/use " .. bag .. " " .. slot)
+end
+
+-- PostClick: clear the macro so a later click never fires a stale one.
+local function afterDE(row)
+  if type(InCombatLockdown) ~= "function" or not InCombatLockdown() then
+    row:SetAttribute("type", nil)
+  end
+end
+
+-- One clickable row: the item's icon and link. Nil when the client
+-- cannot build a secure button, so the caller falls back to chat
+-- instead of showing a list that cannot act.
+local function newDERow(window)
+  local ok, row = pcall(CreateFrame, "Button", nil, window,
+    "SecureActionButtonTemplate")
+  if not ok or row == nil or type(row.SetAttribute) ~= "function" then
+    return nil
+  end
+  row:SetSize(248, 22)
+  -- Both edges registered: the template fires the action on the one
+  -- the ActionButtonUseKeyDown cvar picks (as in VocWarbank).
+  row:RegisterForClicks("AnyDown", "AnyUp")
+  row:SetScript("PreClick", armDE)
+  row:SetScript("PostClick", afterDE)
+  -- Stock buttons play nothing on click, so the row confirms here;
+  -- the up edge is the one that sounds, like every other button.
+  if type(row.HookScript) == "function" then
+    row:HookScript("OnClick", function(_, _, down)
+      if not down then ns.play("on") end
+    end)
+  end
+  row.icon = row:CreateTexture(nil, "ARTWORK")
+  row.icon:SetSize(18, 18)
+  row.icon:SetPoint("LEFT", row, "LEFT", 2, 0)
+  row.text = row:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+  row.text:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
+  row:SetScript("OnEnter", function(self)
+    if type(IsMouseButtonDown) == "function" and IsMouseButtonDown() then return end
+    if type(GameTooltip) ~= "table" then return end
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:SetHyperlink(self.deLink)
+    GameTooltip:AddLine("Click to disenchant",
+      COLORS.muted[1], COLORS.muted[2], COLORS.muted[3])
+    GameTooltip:Show()
+  end)
+  row:SetScript("OnLeave", function()
+    if type(GameTooltip) == "table" then GameTooltip:Hide() end
+  end)
+  return row
+end
+
+-- Lazily builds the window on Blizzard's own dialog template: gold
+-- title, stock close button, escapable, draggable. Nil when the
+-- template is missing, so sales still report over chat there.
+function ns.ensureDEWindow()
+  if ns.deWindow then return ns.deWindow end
+  if type(CreateFrame) ~= "function" then return nil end
+  if type(UIParent) ~= "table" then return nil end
+  local ok, window = pcall(CreateFrame, "Frame", "VocVendorDEWindow",
+    UIParent, "BasicFrameTemplateWithInset")
+  if not ok or window == nil then return nil end
+  window:SetSize(280, 120)
+  window:SetPoint("CENTER")
+  window:SetMovable(true)
+  window:EnableMouse(true)
+  window:RegisterForDrag("LeftButton")
+  window:SetScript("OnDragStart", window.StartMoving)
+  window:SetScript("OnDragStop", window.StopMovingOrSizing)
+  if window.TitleText then window.TitleText:SetText("Disenchant") end
+  -- BasicFrameTemplate ships its own CloseButton; an older template
+  -- without one gets a stock close button (as in VocWarbank).
+  if not window.CloseButton then
+    local closeBtn = CreateFrame("Button", nil, window, "UIPanelCloseButton")
+    if closeBtn then
+      closeBtn:SetPoint("TOPRIGHT", window, "TOPRIGHT", -4, -4)
+      closeBtn:SetScript("OnClick", function() window:Hide() end)
+    end
+  end
+  local hint = window:CreateFontString(nil, "ARTWORK", "GameFontDisable")
+  hint:SetPoint("TOPLEFT", window, "TOPLEFT", 16, -30)
+  hint:SetText("Click an item to disenchant it")
+  if type(UISpecialFrames) == "table" then
+    table.insert(UISpecialFrames, "VocVendorDEWindow")
+  end
+  window:Hide() -- silent: the confirm below is for the player, not the build
+  window:SetScript("OnHide", function() ns.play("close") end)
+  ns.deWindow = window
+  return window
+end
+
+-- Rebuilds the rows from the kept list and shows the window. Takes an
+-- already-collected list (sale, slash, and compartment paths) or
+-- collects when nil (bag updates): nil with a hidden window is a
+-- no-op without a bag scan. Returns the row count, or nil when the
+-- window cannot open (combat, missing template or spell, no secure
+-- buttons): the caller reports over chat instead. The list stays
+-- small by construction (gap-filtered old gear), so rows lay out
+-- without a scroll frame.
+function ns.refreshDEWindow(kept)
+  local locked = type(InCombatLockdown) == "function" and InCombatLockdown()
+  if kept == nil then
+    if not ns.deWindow or not ns.deWindow:IsShown() then return 0 end
+    if locked then return #ns.deRows end
+    kept = ns.collectKeptDisenchantables()
+  elseif locked then
+    return nil
+  end
+  if #kept == 0 then
+    if ns.deWindow and ns.deWindow:IsShown() then ns.deWindow:Hide() end
+    return 0
+  end
+  if not ns.deSpellName() then return nil end
+  local window = ns.ensureDEWindow()
+  if not window then return nil end
+  for i = #ns.deRows + 1, #kept do
+    local row = newDERow(window)
+    if not row then return nil end
+    ns.deRows[#ns.deRows + 1] = row
+  end
+  for i, row in ipairs(ns.deRows) do
+    local it = kept[i]
+    if it then
+      row.deLink, row.deBag, row.deSlot = it.link, it.bag, it.slot
+      row.text:SetText(it.link)
+      local _, _, _, _, _, _, _, _, _, texture = C_Item.GetItemInfo(it.link)
+      if texture then
+        row.icon:SetTexture(texture)
+        row.icon:Show()
+      else
+        row.icon:Hide()
+      end
+      row:ClearAllPoints()
+      row:SetPoint("TOPLEFT", window, "TOPLEFT", 16, -(52 + (i - 1) * 24))
+      row:Show()
+    else
+      row:Hide()
+    end
+  end
+  window:SetSize(280, 64 + #kept * 24)
+  if not window:IsShown() then
+    window:Show()
+    ns.play("open")
+  end
+  return #kept
+end
+
+-- The kept report: the window is the notice, chat only when it cannot
+-- open. `chatAlways` keeps the manual paths as informative as before
+-- on window-less clients; the automatic sale honors announce.
+function ns.reportKept(kept, chatAlways)
+  if not kept or #kept == 0 then return end
+  if ns.refreshDEWindow(kept) then return end
+  if chatAlways or ns.opts().announce then
+    ns.say(ns.keptLine(kept))
+  end
 end
 
 -- Settings
@@ -468,6 +791,8 @@ function ns.ensureSettings()
     "Include BoE gear in old gear. Off keeps it safe: BoE can sell well on the auction house.")
   check("oldGearWarbound", "Also sell Warbound",
     "Include Warbound gear in old gear. Off keeps it safe: alts can use it through the warbank.")
+  check("keepDisenchantable", "Keep disenchantable gear",
+    "Enchanters only: keep gear you could disenchant out of junk sales. Off sells it with junk like any other old gear.")
   ns.settingsBuilt = true
   ns.settingsCategory = category
 end
@@ -479,10 +804,13 @@ end
 
 -- Addon compartment (FAMILY.md "Addon compartment"): the toc names
 -- these three globals; Blizzard's compartment menu calls them with
--- (addonName, button). VocVendor has no window, so the click opens its
--- settings; hover follows the tooltip contract: gold title, one line,
--- the slash hint. Clients without the compartment ignore the metadata.
+-- (addonName, button). The click opens the disenchant list while kept
+-- gear waits, settings otherwise; hover follows the tooltip contract:
+-- gold title, one line, the slash hint. Clients without the
+-- compartment ignore the metadata.
 function VocVendor_CompartmentClick()
+  local kept = ns.collectKeptDisenchantables()
+  if #kept > 0 and ns.refreshDEWindow(kept) then return end
   ns.openConfig()
 end
 
@@ -509,6 +837,7 @@ ns.HELP = {
   "/vv            sell junk now",
   "/vv on|off     auto-sell junk on vendor visits",
   "/vv repair     repair now",
+  "/vv disenchant open the disenchant list",
   "/vv config     open Settings > AddOns > VocVendor",
   "/vv help       this list (/vocvendor works too)",
 }
@@ -540,6 +869,13 @@ SlashCmdList.VOCVENDOR = function(msg)
       return
     end
     if not ns.repairNow() then ns.say("nothing to repair") end
+  elseif msg == "disenchant" then
+    local kept = ns.collectKeptDisenchantables()
+    if #kept == 0 then
+      ns.say("nothing to disenchant")
+    else
+      ns.reportKept(kept, true)
+    end
   elseif msg == "config" then
     ns.openConfig()
   else
@@ -552,6 +888,7 @@ ns.frame = CreateFrame("Frame")
 ns.frame:RegisterEvent("ADDON_LOADED")
 ns.frame:RegisterEvent("PLAYER_LOGIN")
 ns.frame:RegisterEvent("MERCHANT_SHOW")
+ns.frame:RegisterEvent("BAG_UPDATE")
 ns.frame:SetScript("OnEvent", function(_, event, arg1)
   if event == "ADDON_LOADED" and arg1 == name then
     -- The client replaces the SavedVariables global with the loaded
@@ -563,5 +900,7 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1)
     ns.ensureSettings() -- in case Settings wasn't up at ADDON_LOADED
   elseif event == "MERCHANT_SHOW" then
     ns.onMerchantShow()
+  elseif event == "BAG_UPDATE" then
+    ns.refreshDEWindow() -- the disenchant list tracks the bags live
   end
 end)

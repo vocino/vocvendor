@@ -25,8 +25,9 @@ globals = {
 -- WoW API and UI globals read by the addon.
 read_globals = {
   "_G",
-  "C_Container", "C_Item", "C_MerchantFrame",
+  "C_Container", "C_Item", "C_MerchantFrame", "C_Spell", "C_SpellBook",
   "CreateFrame", "GetInventoryItemLink", "GetMoney",
+  "InCombatLockdown", "IsMouseButtonDown", "UIParent", "UISpecialFrames",
   "MerchantFrame", "MerchantSellAllJunkButton", "NUM_BAG_SLOTS",
   "CanGuildBankRepair", "CanMerchantRepair", "GetRepairAllCost",
   "RepairAllItems",
