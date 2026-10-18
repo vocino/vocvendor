@@ -300,9 +300,11 @@ addon prefix like every other global.
   LICENSE               MIT
   .pkgmeta              package-as + ignore list for dev files
   .luacheckrc           lint config declaring the addon's globals
+  .wowluarc.json        wowlua-ls config: the retail + forever flavors,
+                        allowed globals ($schema-validated)
   .gitignore            `.reference/` local analysis checkouts
   .github/workflows/
-    test.yml            tests, luacheck, and the skill checks on every push and PR
+    test.yml            tests, luacheck, wowlua-ls, and the skill checks on every push and PR
     release.yml         BigWigsMods packager on `v*` tags
     tag.yml             cuts a tag from anywhere that cannot push one
 ```
@@ -347,7 +349,12 @@ the tag. Nothing is a `RequiredDeps`: other addons are guests.
 - `luacheck .` passes with the repo's `.luacheckrc`, which lists the
   WoW globals the addon reads and the globals it owns
   (SavedVariables, `SLASH_*`).
-- `test.yml` runs both on every push and pull request.
+- `wowlua_ls check . --severity warning` passes. wowlua-ls is the
+  WoW-aware linter (typed events, flavor checks, template mixins);
+  the repo's `.wowluarc.json` pins the `retail` + `forever` flavors
+  so wrong-flavor API use fails the check. The binary ships with
+  the VS Code extension, or download it from the wowlua-ls releases.
+- `test.yml` runs all three on every push and pull request.
 
 ## Debugging
 

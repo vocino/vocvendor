@@ -59,8 +59,11 @@ on `ns`. Never introduce an unprefixed global; `luacheck .` enforces it.
 
 ## Tests
 
-Run `lua tests/run.lua` (Lua 5.1 or 5.4) and `luacheck .` from the
-repo root after behavior changes. Both run in CI on every push.
+Run `lua tests/run.lua` (Lua 5.1 or 5.4), `luacheck .`, and
+`wowlua_ls check . --severity warning` from the repo root after
+behavior changes. All three run in CI on every push. The wowlua-ls
+binary ships with the VS Code extension, or download it from the
+wowlua-ls releases.
 Tests are excluded from the packaged addon (see `.pkgmeta`).
 Local lint needs luacheck 1.x or newer: the config uses the lua54
 std, which the archived 0.23.0 line does not know.
