@@ -62,6 +62,8 @@ on `ns`. Never introduce an unprefixed global; `luacheck .` enforces it.
 Run `lua tests/run.lua` (Lua 5.1 or 5.4) and `luacheck .` from the
 repo root after behavior changes. Both run in CI on every push.
 Tests are excluded from the packaged addon (see `.pkgmeta`).
+Local lint needs luacheck 1.x or newer: the config uses the lua54
+std, which the archived 0.23.0 line does not know.
 
 ## Releases
 
