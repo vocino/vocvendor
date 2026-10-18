@@ -401,9 +401,11 @@ function ns.slotHasValue(bag, slot)
 end
 
 -- Heuristic for "rather disenchant than sell": uncommon, rare, or epic
--- weapons/armor with a vendor price. Anything the Disenchant spell cannot
--- target stays out of the list. Uncached items fail closed, like every
--- other unknown in this file.
+-- weapons/armor with a vendor price. It cannot see Blizzard's per-item
+-- disenchant flag (set on some gear, e.g. class-hall pieces) or the
+-- caster's skill, so a listed row can still fail at the cast with
+-- "That item is not a valid target"; those sell by hand. Uncached items
+-- fail closed, like every other unknown in this file.
 function ns.isDisenchantable(link)
   local _, _, _, equipLoc, _, classID = C_Item.GetItemInfoInstant(link)
   if not equipLoc or equipLoc == "" then return false end
