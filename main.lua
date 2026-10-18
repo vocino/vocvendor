@@ -886,6 +886,7 @@ SlashCmdList.VOCVENDOR = function(msg)
 end
 
 -- Events
+---@type Frame
 ns.frame = CreateFrame("Frame")
 ns.frame:RegisterEvent("ADDON_LOADED")
 ns.frame:RegisterEvent("PLAYER_LOGIN")
