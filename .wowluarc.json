@@ -1,0 +1,55 @@
+{
+  "addonRoot": true,
+  "flavors": [
+    "retail",
+    "forever"
+  ],
+  "ignore": [
+    ".reference/**"
+  ],
+  "globals": {
+    "read": [
+      "_G",
+      "C_Container",
+      "C_Item",
+      "C_MerchantFrame",
+      "C_Spell",
+      "C_SpellBook",
+      "CreateFrame",
+      "GetInventoryItemLink",
+      "GetMoney",
+      "InCombatLockdown",
+      "IsMouseButtonDown",
+      "UIParent",
+      "UISpecialFrames",
+      "MerchantFrame",
+      "MerchantSellAllJunkButton",
+      "NUM_BAG_SLOTS",
+      "CanGuildBankRepair",
+      "CanMerchantRepair",
+      "GetRepairAllCost",
+      "RepairAllItems",
+      "Settings",
+      "MinimalSliderWithSteppersMixin",
+      "StaticPopup_Show",
+      "Enum",
+      "PlaySound",
+      "SOUNDKIT",
+      "GameTooltip",
+      "hooksecurefunc",
+      "strtrim",
+      "PawnGetItemData",
+      "PawnIsItemAnUpgrade"
+    ],
+    "write": [
+      "VocVendorDB",
+      "SLASH_VOCVENDOR1",
+      "SLASH_VOCVENDOR2",
+      "SlashCmdList",
+      "StaticPopupDialogs",
+      "VocVendor_CompartmentClick",
+      "VocVendor_CompartmentEnter",
+      "VocVendor_CompartmentLeave"
+    ]
+  }
+}
