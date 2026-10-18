@@ -1,0 +1,13 @@
+{
+  "globals": {
+    "read": [
+      "debug",
+      "dofile",
+      "io",
+      "load",
+      "loadfile",
+      "os"
+    ]
+  }
+}
+
