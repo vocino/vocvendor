@@ -40,7 +40,10 @@
       "hooksecurefunc",
       "strtrim",
       "PawnGetItemData",
-      "PawnIsItemAnUpgrade"
+      "PawnIsItemAnUpgrade",
+      "Auctionator",
+      "TSM_API",
+      "OEMarketInfo"
     ],
     "write": [
       "VocVendorDB",

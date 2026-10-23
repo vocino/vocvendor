@@ -85,7 +85,8 @@ local defaults = {
   oldGearIlvlGap = 30,    -- ...when this far below equipped
   oldGearBoE = false,     -- include Bind on Equip in old gear
   oldGearWarbound = false,-- include Warbound in old gear
-  keepDisenchantable = true, -- keep gear you could disenchant
+  keepDisenchantable = true,
+  compareAuction = true,  -- skip vendor sale when auction nets more
 }
 ns.defaults = defaults
 
@@ -115,6 +116,73 @@ function ns.moneyString(copper)
   return string.format("%dc", c)
 end
 
+-- Auction math: vendor vs auction vs disenchant-then-auction. Other
+-- pricing addons are guests (FAMILY.md principle 4): every call is
+-- presence-gated and pcall-guarded, and no data means vendor wins.
+-- Order follows install base: Auctionator, TradeSkillMaster, Oribos.
+-- Blizzard takes a 5% cut on every auction sale, so gross prices are
+-- compared net of it; ties keep the instant vendor sale.
+ns.AH_CUT = 0.05
+function ns.auctionNet(price)
+  price = tonumber(price) or 0
+  if price <= 0 then return 0 end
+  return math.floor(price * (1 - ns.AH_CUT))
+end
+function ns.getAuctionPrice(link, itemID)
+  if not link and not itemID then return nil end
+  if not itemID and link then itemID = ns.itemID(link) end
+  local api = type(Auctionator) == "table" and Auctionator.API and Auctionator.API.v1 or nil
+  if api then
+    if itemID and type(api.GetAuctionPriceByItemID) == "function" then
+      local ok, price = pcall(api.GetAuctionPriceByItemID, "VocVendor", itemID)
+      if ok and type(price) == "number" and price > 0 then return price end
+    end
+    if link and type(api.GetAuctionPriceByItemLink) == "function" then
+      local ok, price = pcall(api.GetAuctionPriceByItemLink, "VocVendor", link)
+      if ok and type(price) == "number" and price > 0 then return price end
+    end
+  end
+  if type(TSM_API) == "table" and type(TSM_API.GetCustomPriceValue) == "function" and type(TSM_API.ToItemString) == "function" and link then
+    local okStr, itemStr = pcall(TSM_API.ToItemString, link)
+    if okStr and itemStr then
+      local ok, price = pcall(TSM_API.GetCustomPriceValue, "DBMarket", itemStr)
+      if ok and type(price) == "number" and price > 0 then return price end
+    end
+  end
+  if type(OEMarketInfo) == "function" then
+    local info = {}
+    local ok = pcall(OEMarketInfo, link or itemID, info)
+    if ok and type(info) == "table" then
+      if tonumber(info.market) and info.market > 0 then return info.market end
+      if tonumber(info.region) and info.region > 0 then return info.region end
+    end
+  end
+  return nil
+end
+function ns.getDisenchantValue(link, itemID)
+  if not link and not itemID then return nil end
+  if not itemID and link then itemID = ns.itemID(link) end
+  local api = type(Auctionator) == "table" and Auctionator.API and Auctionator.API.v1 or nil
+  if api then
+    if link and type(api.GetDisenchantPriceByItemLink) == "function" then
+      local ok, price = pcall(api.GetDisenchantPriceByItemLink, "VocVendor", link)
+      if ok and type(price) == "number" and price > 0 then return price end
+    end
+    if itemID and type(api.GetDisenchantPriceByItemID) == "function" then
+      local ok, price = pcall(api.GetDisenchantPriceByItemID, "VocVendor", itemID)
+      if ok and type(price) == "number" and price > 0 then return price end
+    end
+  end
+  return nil
+end
+function ns.compareItem(vendor, auction, deValue)
+  vendor = tonumber(vendor) or 0
+  local auctionNet = tonumber(auction) and auction > 0 and ns.auctionNet(auction) or 0
+  local deNet = tonumber(deValue) and deValue > 0 and ns.auctionNet(deValue) or 0
+  if deNet > vendor and deNet > auctionNet then return "disenchant" end
+  if auctionNet > vendor then return "auction" end
+  return "vendor"
+end
 -- The configured junk right now: gray count (Blizzard's definition) plus
 -- the old-gear list when the player opted it into the definition.
 function ns.collectJunk()
@@ -129,6 +197,31 @@ function ns.collectJunk()
     oldGear = ns.collectOldGear()
   end
   return { grayCount = grayCount, oldGear = oldGear }
+end
+
+-- Deferred sale accounting: every sale in a vendor visit adds its count
+-- and copper here; MERCHANT_CLOSED reports one line for the whole visit.
+ns.visitCount = 0
+ns.visitEarned = 0
+
+function ns.recordSale(n, earned)
+  ns.visitCount = ns.visitCount + (n or 0)
+  ns.visitEarned = ns.visitEarned + (earned or 0)
+end
+
+-- One line per vendor visit. Nil when nothing sold.
+function ns.visitLine(count, earned)
+  if (count or 0) == 0 then return nil end
+  local what = count == 1 and "1 item" or count .. " items"
+  return "sold " .. what .. " for " .. ns.moneyString(earned or 0)
+end
+
+-- Visit close: the single deferred line. Resets either way, so a visit
+-- never reports twice.
+function ns.flushVisit()
+  local line = ns.visitLine(ns.visitCount, ns.visitEarned)
+  ns.visitCount, ns.visitEarned = 0, 0
+  if line and ns.opts().announce then ns.say(line) end
 end
 
 -- Sells the gray pile via Blizzard's own API. Returns copper earned.
@@ -155,37 +248,106 @@ end
 -- Sells a candidate list, re-verifying each slot first: bags shift
 -- between the dry-run and the click, and we never sell the wrong item.
 -- Set membership and vendor value are rechecked too: a slot that joined
--- a set, or that the vendor won't buy, stays put.
--- Quiet: the caller composes the announcement. Returns count and copper.
+-- a set, or that the vendor won't buy, stays put and the loop moves on.
+-- A sale that fails stops the loop: the failing item and everything
+-- after it come back as the leftover list with per-row reasons, and the
+-- caller surfaces them. Nothing retries: a failed click left the item
+-- in the bags, and clicking again only spams the server.
+-- Quiet: the caller composes the announcement.
+-- Returns count, copper, and the leftover list.
 function ns.sellOldGearItems(items)
   local n, value = 0, 0
-  if type(C_Container) ~= "table" then return n, value end
-  if type(C_Container.GetContainerItemLink) ~= "function" then return n, value end
-  for _, it in ipairs(items or {}) do
-    if C_Container.GetContainerItemLink(it.bag, it.slot) == it.link
-      and not ns.inEquipmentSet(it.bag, it.slot)
-      and ns.slotHasValue(it.bag, it.slot) then
+  local leftover = {}
+  if type(C_Container) ~= "table" then return n, value, leftover end
+  if type(C_Container.GetContainerItemLink) ~= "function" then return n, value, leftover end
+  items = items or {}
+  for i, it in ipairs(items) do
+    local reason = nil
+    if C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
+      reason = "moved"
+    elseif ns.inEquipmentSet(it.bag, it.slot) then
+      reason = "in equipment set"
+    elseif not ns.slotHasValue(it.bag, it.slot) then
+      reason = "vendor won't buy"
+    elseif ns.opts().compareAuction then
+      local auction = ns.getAuctionPrice(it.link)
+      local deValue = ns.isDisenchantable(it.link) and ns.getDisenchantValue(it.link) or nil
+      local verdict = ns.compareItem(it.price, auction, deValue)
+      if verdict == "auction" then
+        reason = "auction worth more (" .. ns.moneyString(ns.auctionNet(auction)) .. " net)"
+      elseif verdict == "disenchant" then
+        reason = "disenchant worth more (" .. ns.moneyString(ns.auctionNet(deValue)) .. " net)"
+      end
+    end
+    if reason then
+      leftover[#leftover + 1] = { link = it.link, reason = reason }
+    else
       local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
-      if ok then
+      local still = false
+      if type(C_Container.GetContainerItemLink) == "function" then
+        local okLink, now = pcall(C_Container.GetContainerItemLink, it.bag, it.slot)
+        still = okLink and now == it.link
+      end
+      if ok and not still then
         n = n + 1
         value = value + (it.price or 0)
+      else
+        leftover[#leftover + 1] = { link = it.link,
+          reason = (not ok) and "sell failed" or "still in bags" }
+        for j = i + 1, #items do
+          leftover[#leftover + 1] = { link = items[j].link, reason = "sale stopped" }
+        end
+        break
       end
     end
   end
-  return n, value
+  return n, value, leftover
 end
 
-function ns.junkSummary(grayCount, earned, nOld)
-  local parts = {}
-  if grayCount > 0 then
-    parts[#parts + 1] = grayCount .. " junk"
+-- The leftover report: a header through the addon voice, then one row
+-- per item with its reason. Always shown: a failed sale is information,
+-- not an announcement.
+function ns.reportLeftover(leftover)
+  if not leftover or #leftover == 0 then return end
+  local what = #leftover == 1 and "1 item" or #leftover .. " items"
+  ns.say("couldn't sell " .. what .. ":")
+  for _, it in ipairs(leftover) do
+    print("  " .. tostring(it.link) .. " (" .. it.reason .. ")")
   end
-  if nOld > 0 then
-    parts[#parts + 1] = nOld .. " old gear"
+end
+
+-- Numeric item ID for a bag link, nil when the client cannot say.
+function ns.itemID(link)
+  if type(C_Item) ~= "table" then return nil end
+  if type(C_Item.GetItemInfoInstant) ~= "function" then return nil end
+  local ok, id = pcall(C_Item.GetItemInfoInstant, link)
+  if ok and type(id) == "number" then return id end
+  return nil
+end
+
+-- Merges identical junk by item ID into summary groups with summed
+-- quantity and total, first-seen order. Links without a known ID merge
+-- by link, so uncached items still group instead of scattering.
+function ns.mergeByID(items)
+  local groups, byID = {}, {}
+  for _, it in ipairs(items or {}) do
+    local id = ns.itemID(it.link) or it.link
+    local g = byID[id]
+    if not g then
+      g = { link = it.link, qty = 0, total = 0 }
+      byID[id] = g
+      groups[#groups + 1] = g
+    end
+    g.qty = g.qty + 1
+    g.total = g.total + (it.price or 0)
   end
-  if #parts == 0 then return nil end
-  return "sold " .. table.concat(parts, ", ") .. " for "
-    .. ns.moneyString(earned)
+  return groups
+end
+
+-- One merged summary row: quantity, link, and summed total.
+function ns.mergedLine(g)
+  local what = g.qty == 1 and g.link or g.qty .. "x " .. g.link
+  return "  " .. what .. " for " .. ns.moneyString(g.total)
 end
 
 -- Kept-for-disenchant report: nil when nothing was kept.
@@ -207,13 +369,17 @@ function ns.autoSell()
   local kept = ns.collectKeptDisenchantables()
   if junk.grayCount == 0 and #junk.oldGear == 0 and #kept == 0 then return end
   local earned = 0
+  local nGray = 0
   ns.reportKept(kept)
-  if junk.grayCount > 0 then earned = ns.sellGrays() end
-  local nOld, oldValue = ns.sellOldGearItems(junk.oldGear)
-  local line = ns.junkSummary(junk.grayCount, earned + oldValue, nOld)
-  if line then
+  if junk.grayCount > 0 then
+    earned = ns.sellGrays()
+    nGray = junk.grayCount
+  end
+  local nOld, oldValue, leftover = ns.sellOldGearItems(junk.oldGear)
+  ns.reportLeftover(leftover)
+  if nGray + nOld > 0 then
     ns.sellSound()
-    if ns.opts().announce then ns.say(line) end
+    ns.recordSale(nGray + nOld, earned + oldValue)
   end
 end
 
@@ -257,11 +423,19 @@ function ns.repairNow()
 end
 
 function ns.onMerchantShow()
+  -- A visit whose close we missed (reload mid-visit) still gets its one
+  -- line before the new visit starts counting.
+  ns.flushVisit()
   ns.hookJunkButton()
   -- Sell first: junk gold pays for the repair that follows.
   local o = ns.opts()
   if o.autoSell then ns.autoSell() end
   if o.autoRepair then ns.repairNow() end
+end
+
+-- Visit close: the one deferred line for everything sold since SHOW.
+function ns.onMerchantClosed()
+  ns.flushVisit()
 end
 
 -- The native Sell Junk button, enhanced. We keep Blizzard's button,
@@ -325,7 +499,7 @@ function ns.onJunkButtonClick(button)
   for _, it in ipairs(junk.oldGear) do total = total + (it.price or 0) end
   ns.say("junk to sell (" .. junk.grayCount .. " gray, "
     .. #junk.oldGear .. " old gear):")
-  for _, it in ipairs(junk.oldGear) do print("  " .. it.link) end
+  for _, g in ipairs(ns.mergeByID(junk.oldGear)) do print(ns.mergedLine(g)) end
   StaticPopup_Show("VOCVENDOR_SELL_JUNK",
     junk.grayCount + #junk.oldGear, ns.moneyString(total),
     { grayCount = junk.grayCount, oldGear = junk.oldGear })
@@ -336,13 +510,17 @@ end
 function ns.sellJunkNow(data)
   data = data or {}
   local earned = 0
+  local nGray = 0
   ns.reportKept(ns.collectKeptDisenchantables())
-  if (data.grayCount or 0) > 0 then earned = ns.sellGrays() end
-  local nOld, oldValue = ns.sellOldGearItems(data.oldGear)
-  local line = ns.junkSummary(data.grayCount or 0, earned + oldValue, nOld)
-  if line then
+  if (data.grayCount or 0) > 0 then
+    earned = ns.sellGrays()
+    nGray = data.grayCount
+  end
+  local nOld, oldValue, leftover = ns.sellOldGearItems(data.oldGear)
+  ns.reportLeftover(leftover)
+  if nGray + nOld > 0 then
     ns.sellSound()
-    if ns.opts().announce then ns.say(line) end
+    ns.recordSale(nGray + nOld, earned + oldValue)
   end
 end
 
@@ -445,7 +623,66 @@ end
 -- below everything equipped in its slot(s), passing the exclusion
 -- filters. Gear kept for disenchanting never qualifies (unless
 -- ignoreDE). Uncached items are skipped rather than guessed about.
+--
+-- Collection safety gate: true when the item teaches something the
+-- player lacks -- a transmog appearance, a toy, or a pet -- so it is
+-- never junk, no matter how far below the equipped piece it sits.
+-- Fail closed: an unknown item, or a missing API, keeps the item.
+-- Every name here is verified against both clients (see AGENTS.md);
+-- each check is presence-gated so the gate degrades to keeping.
+function ns.isUncollectedCollectible(link)
+  if type(C_Item) ~= "table" then return true end
+  if type(C_Item.GetItemInfoInstant) ~= "function" then return true end
+  local okInst, itemID = pcall(C_Item.GetItemInfoInstant, link)
+  if not okInst or type(itemID) ~= "number" then return true end
+  local cosmetic = false
+  if type(C_Item.IsCosmeticItem) == "function" then
+    local ok, v = pcall(C_Item.IsCosmeticItem, itemID)
+    if not ok then return true end
+    cosmetic = v == true
+  end
+  local teachesSet = false
+  if type(C_Item.GetItemLearnTransmogSet) == "function" then
+    local ok, v = pcall(C_Item.GetItemLearnTransmogSet, itemID)
+    if not ok then return true end
+    teachesSet = v ~= nil
+  end
+  if cosmetic or teachesSet then
+    if type(C_TransmogCollection) ~= "table" then return true end
+    if type(C_TransmogCollection.PlayerHasTransmogByItemInfo) ~= "function" then
+      return true
+    end
+    local ok, has = pcall(C_TransmogCollection.PlayerHasTransmogByItemInfo, link)
+    if not ok then return true end
+    if not has then return true end
+  end
+  if type(C_ToyBox) == "table"
+    and type(C_ToyBox.GetToyInfo) == "function" then
+    local ok, info = pcall(C_ToyBox.GetToyInfo, itemID)
+    if not ok then return true end
+    if info ~= nil then
+      if type(PlayerHasToy) ~= "function" then return true end
+      local okHas, has = pcall(PlayerHasToy, itemID)
+      if not okHas then return true end
+      if not has then return true end
+    end
+  end
+  if type(C_PetJournal) == "table"
+    and type(C_PetJournal.GetPetInfoByItemID) == "function"
+    and type(C_PetJournal.GetNumCollectedInfo) == "function" then
+    local r = { pcall(C_PetJournal.GetPetInfoByItemID, itemID) }
+    if not r[1] then return true end
+    local speciesID = tonumber(r[14]) or 0
+    if speciesID ~= 0 then
+      local okN, owned = pcall(C_PetJournal.GetNumCollectedInfo, speciesID)
+      if not okN then return true end
+      if (tonumber(owned) or 0) == 0 then return true end
+    end
+  end
+  return false
+end
 function ns.isOldGear(link, gap, ignoreDE)
+  if ns.isUncollectedCollectible(link) then return false end
   local _, _, _, equipLoc, _, classID = C_Item.GetItemInfoInstant(link)
   if not equipLoc or equipLoc == "" then return false end
   if classID ~= Enum.ItemClass.Weapon and classID ~= Enum.ItemClass.Armor then
@@ -740,6 +977,22 @@ function ns.refreshDEWindow(kept)
   return #kept
 end
 
+-- Auction hints for kept gear: an item whose own auction net beats its
+-- disenchant net is worth listing, not breaking. Returns hint lines.
+function ns.keptAuctionHints(kept)
+  local hints = {}
+  if not ns.opts().compareAuction then return hints end
+  for _, it in ipairs(kept or {}) do
+    local auction = ns.getAuctionPrice(it.link)
+    if auction then
+      local deValue = ns.getDisenchantValue(it.link)
+      if not deValue or ns.auctionNet(auction) > ns.auctionNet(deValue) then
+        hints[#hints + 1] = "  " .. tostring(it.link) .. " worth " .. ns.moneyString(ns.auctionNet(auction)) .. " net on auction"
+      end
+    end
+  end
+  return hints
+end
 -- The kept report: the window is the notice, chat only when it cannot
 -- open. `chatAlways` keeps the manual paths as informative as before
 -- on window-less clients; the automatic sale honors announce.
@@ -748,6 +1001,7 @@ function ns.reportKept(kept, chatAlways)
   if ns.refreshDEWindow(kept) then return end
   if chatAlways or ns.opts().announce then
     ns.say(ns.keptLine(kept))
+    for _, h in ipairs(ns.keptAuctionHints(kept)) do print(h) end
   end
 end
 
@@ -793,6 +1047,8 @@ function ns.ensureSettings()
     "Include BoE gear in old gear. Off keeps it safe: BoE can sell well on the auction house.")
   check("oldGearWarbound", "Also sell Warbound",
     "Include Warbound gear in old gear. Off keeps it safe: alts can use it through the warbank.")
+  check("compareAuction", "Compare auction prices",
+    "Skip vendor sale when auction data says the auction house or disenchanting nets more. Needs Auctionator, TradeSkillMaster, or Oribos Exchange.")
   check("keepDisenchantable", "Keep disenchantable gear",
     "Enchanters only: keep gear you could disenchant out of junk sales. Off sells it with junk like any other old gear.")
   ns.settingsBuilt = true
@@ -831,6 +1087,39 @@ function VocVendor_CompartmentLeave()
   if type(GameTooltip) == "table" then GameTooltip:Hide() end
 end
 
+-- Same-job addons that also work the merchant. When one is loaded we
+-- warn once and stand down instead of fighting it over every sale;
+-- either addon alone does the job, both together double-sell nothing
+-- but double-report everything.
+ns.RIVALS = { "Scrap", "Dejunk", "SellJunk", "JunkIt" }
+ns.rivalWarned = false
+
+function ns.findRival()
+  if type(C_AddOns) ~= "table" then return nil end
+  if type(C_AddOns.IsAddOnLoaded) ~= "function" then return nil end
+  for _, other in ipairs(ns.RIVALS) do
+    local ok, loaded = pcall(C_AddOns.IsAddOnLoaded, other)
+    if ok and loaded then return other end
+  end
+  return nil
+end
+
+-- Warns once per session and pauses auto-sell while the rival is
+-- loaded. The stand-down names its exact re-enable command, so the
+-- player is never left wondering how to get the job back.
+function ns.checkRivals()
+  if ns.rivalWarned then return end
+  local rival = ns.findRival()
+  if not rival then return end
+  ns.rivalWarned = true
+  if ns.opts().autoSell then
+    ns.opts().autoSell = false
+    ns.say(rival .. " also sells junk: auto-sell paused (turn back on with /vv on)")
+  else
+    ns.say(rival .. " also sells junk: auto-sell stays off (turn on with /vv on)")
+  end
+end
+
 -- Slash grammar shared by every Voc addon (FAMILY.md): the bare command
 -- does the one main thing (the manual junk sale, same as the native
 -- Sell Junk button), `config` opens the panel, `help` lists the rest,
@@ -864,7 +1153,7 @@ SlashCmdList.VOCVENDOR = function(msg)
   elseif msg == "on" or msg == "off" then
     o.autoSell = (msg == "on")
     ns.play(o.autoSell and "on" or "off")
-    ns.say("auto-sell junk " .. (o.autoSell and "on" or "off"))
+    ns.say("auto-sell junk " .. (o.autoSell and "on" or "off (turn back on with /vv on)"))
   elseif msg == "repair" then
     if type(MerchantFrame) ~= "table" or not MerchantFrame:IsShown() then
       ns.say("open a vendor first")
@@ -891,6 +1180,7 @@ ns.frame = CreateFrame("Frame")
 ns.frame:RegisterEvent("ADDON_LOADED")
 ns.frame:RegisterEvent("PLAYER_LOGIN")
 ns.frame:RegisterEvent("MERCHANT_SHOW")
+ns.frame:RegisterEvent("MERCHANT_CLOSED")
 ns.frame:RegisterEvent("BAG_UPDATE")
 ns.frame:SetScript("OnEvent", function(_, event, arg1)
   if event == "ADDON_LOADED" and arg1 == name then
@@ -899,10 +1189,16 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1)
     if type(VocVendorDB) ~= "table" then VocVendorDB = {} end
     ns.db = VocVendorDB
     ns.ensureSettings()
+    ns.checkRivals() -- a same-job addon loaded before us stands us down
+  elseif event == "ADDON_LOADED" then
+    ns.checkRivals() -- a same-job addon loaded after us does the same
   elseif event == "PLAYER_LOGIN" then
     ns.ensureSettings() -- in case Settings wasn't up at ADDON_LOADED
+    ns.checkRivals()
   elseif event == "MERCHANT_SHOW" then
     ns.onMerchantShow()
+  elseif event == "MERCHANT_CLOSED" then
+    ns.onMerchantClosed()
   elseif event == "BAG_UPDATE" then
     ns.refreshDEWindow() -- the disenchant list tracks the bags live
   end

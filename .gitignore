@@ -1,2 +1,7 @@
 # Local reference checkouts for code analysis. Never packaged or committed.
 .reference/
+
+# Windows filesystem junk (stray Explorer / tool artifacts, never committed).
+%SystemDrive%/
+Thumbs.db
+Desktop.ini
