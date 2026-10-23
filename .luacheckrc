@@ -26,6 +26,8 @@ globals = {
 read_globals = {
   "_G",
   "C_Container", "C_Item", "C_MerchantFrame", "C_Spell", "C_SpellBook",
+  "C_AddOns", "C_ToyBox", "C_PetJournal", "C_TransmogCollection",
+  "PlayerHasToy", -- bare C global; Blizzard still calls it bare on both clients
   "CreateFrame", "GetInventoryItemLink", "GetMoney",
   "InCombatLockdown", "IsMouseButtonDown", "UIParent", "UISpecialFrames",
   "MerchantFrame", "MerchantSellAllJunkButton", "NUM_BAG_SLOTS",
@@ -37,8 +39,9 @@ read_globals = {
   "PlaySound", "SOUNDKIT", -- presence-gated; ns.play falls back to numeric IDs
   "GameTooltip",
   "hooksecurefunc", "strtrim",
-  -- Pawn (optional guest: never sell what it flags as an upgrade)
+  -- Optional guests: Pawn upgrades never sell; Auctionator/TSM/Oribos feed auction math
   "PawnGetItemData", "PawnIsItemAnUpgrade",
+  "Auctionator", "TSM_API", "OEMarketInfo",
 }
 
 files["tests/**"] = {

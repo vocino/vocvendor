@@ -17,7 +17,7 @@ on Retail and on the Forever client.
 ## Use
 
 Open any vendor. Junk sells, gear repairs (guild funds first when the
-guild allows it), and one chat line reports the take. Gear kept for
+guild allows it), and one chat line reports the take at close. Gear kept for
 disenchanting opens a click-to-disenchant list instead of a chat line:
 click an item to disenchant it. The native Sell
 Junk button keeps working and gains your definition: with old gear in
@@ -46,6 +46,7 @@ Settings > AddOns > VocVendor, or `/vv config`:
 - Old gear ilvl gap (10-100 in 5s, default 30)
 - Also sell Bind on Equip (default off: BoE can sell on the auction house)
 - Also sell Warbound (default off: alts can use it through the warbank)
+- Compare auction prices (default on: with Auctionator, TradeSkillMaster, or Oribos Exchange installed, gear worth more on the auction house is held back with its reason instead of sold)
 - Keep disenchantable gear (default on: enchanters disenchant it from the list instead of selling it)
 
 Every change applies at once.
@@ -57,10 +58,15 @@ Junk button makes. Old gear is weapons and armor at least the
 configured gap below everything you wear in that slot, never
 heirlooms, never anything in a saved equipment set, never anything
 Pawn flags as an upgrade when Pawn is
-installed, and never BoE or Warbound unless you opt them in. Each
+installed, never BoE or Warbound unless you opt them in, and never an
+uncollected transmog appearance, toy, or pet. Each
 candidate is re-checked by bag slot right before it sells, so a bag
 that shifted between the dry run and the click never sells the wrong
-item. Repairs mirror the merchant frame's own buttons: guild bank
+item. When Auctionator, TradeSkillMaster, or Oribos Exchange is installed, old gear worth more on the auction house (sold directly, or disenchanted first, net of the 5% auction cut) is held back with its reason instead of sold. A sale that fails stops the run and lists what is left with the
+reason, instead of retrying. When another junk-selling addon is loaded,
+VocVendor warns once and pauses its own auto-sell; `/vv on` turns it
+back on.
+Repairs mirror the merchant frame's own buttons: guild bank
 first when allowed, your gold otherwise, and only when you can pay.
 Gear kept for disenchanting (uncommon, rare, or epic, for enchanters) opens a
 click-to-disenchant window instead: one row per item, each click

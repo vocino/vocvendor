@@ -31,11 +31,18 @@ local function loadAddon(world)
   g.C_Container = {
     GetContainerNumSlots = function(bag) return #(world.bags[bag] or {}) end,
     GetContainerItemLink = function(bag, slot)
+      if world.removed[bag .. ":" .. slot] then return nil end
       local b = world.bags[bag]
       return b and b[slot] or nil
     end,
     UseContainerItem = function(bag, slot)
+      -- world.sellErrors["bag:slot"] makes the click fail; world.stuck
+      -- leaves the item behind so the post-click check sees it.
+      if world.sellErrors[bag .. ":" .. slot] then error("sell failed") end
       world.sold[#world.sold + 1] = { bag = bag, slot = slot }
+      if not world.stuck[bag .. ":" .. slot] then
+        world.removed[bag .. ":" .. slot] = true
+      end
       return true
     end,
     -- world.equipSets["bag:slot"] = true marks a slot in a saved set.
@@ -64,6 +71,41 @@ local function loadAddon(world)
     end,
     GetDetailedItemLevelInfo = function(link) return world.levels[link] end,
     IsItemBindToAccountUntilEquip = function(link) return world.warbound[link] == true end,
+    -- world.cosmetic[itemID] marks a cosmetic item; world.transmogSet
+    -- [itemID] a transmog-set piece. Both default to ordinary gear.
+    -- (Blizzard takes the numeric ID here, like its own callers do.)
+    IsCosmeticItem = function(itemID) return world.cosmetic[itemID] == true end,
+    GetItemLearnTransmogSet = function(itemID) return world.transmogSet[itemID] end,
+  }
+  g.C_TransmogCollection = {
+    -- world.noTransmog[link] marks an appearance the player lacks.
+    PlayerHasTransmogByItemInfo = function(link)
+      return world.noTransmog[link] ~= true
+    end,
+  }
+  g.C_ToyBox = {
+    -- world.toyInfo[itemID] non-nil marks a toy item.
+    GetToyInfo = function(itemID) return world.toyInfo[itemID] end,
+  }
+  -- world.ownedToys[itemID] marks a toy the player owns.
+  g.PlayerHasToy = function(itemID) return world.ownedToys[itemID] == true end
+  g.C_PetJournal = {
+    -- world.petSpecies[itemID] = speciesID marks a pet item; the 13th
+    -- return is the species, matching Blizzard's signature.
+    GetPetInfoByItemID = function(itemID)
+      local s = world.petSpecies[itemID]
+      if s == nil then return nil end
+      return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, s
+    end,
+    -- world.petOwned[speciesID] marks a collected pet.
+    GetNumCollectedInfo = function(speciesID)
+      if world.petOwned[speciesID] then return 1, 1 end
+      return 0, 1
+    end,
+  }
+  g.C_AddOns = {
+    -- world.loadedAddons[name] = true marks an installed+loaded addon.
+    IsAddOnLoaded = function(n) return world.loadedAddons[n] == true end,
   }
   g.C_MerchantFrame = {
     GetNumJunkItems = function() return world.junkCount end,
@@ -258,6 +300,10 @@ local function newWorld()
     settingsCategory = nil, savedVars = nil,
     blizzClicked = false, hookedClick = {}, hooks = {}, buttonEnabled = nil,
     playedSounds = {}, noValues = {},
+    removed = {}, stuck = {}, sellErrors = {},
+    cosmetic = {}, transmogSet = {}, noTransmog = {},
+    toyInfo = {}, ownedToys = {}, petSpecies = {}, petOwned = {},
+    loadedAddons = {},
     combat = false, deSpellName = "Disenchant", noSecure = false,
   }
 end
@@ -307,6 +353,7 @@ do
   check("default BoE excluded", o.oldGearBoE == false)
   check("default Warbound excluded", o.oldGearWarbound == false)
   check("default keep disenchantable", o.keepDisenchantable == true)
+  check("default compareAuction", o.compareAuction == true)
 end
 
 -- 1b. An out-of-range gap (hand-edited SavedVariables) resets to the
@@ -334,17 +381,41 @@ do
   check("money negative", ns.moneyString(-5) == "0c")
 end
 
--- 2b. The summary line takes the gray count directly.
+-- 2b. The visit line counts every item sold, whatever pile it came
+-- from. Nil when nothing sold, so the close stays silent.
 do
   local w = newWorld()
   local ns = loadAddon(w)
-  check("summary grays", ns.junkSummary(3, 450, 0) == "sold 3 junk for 4s 50c")
-  check("summary old gear", ns.junkSummary(0, 0, 2) == "sold 2 old gear for 0c")
-  check("summary both", ns.junkSummary(2, 450, 1) == "sold 2 junk, 1 old gear for 4s 50c")
-  check("summary nothing", ns.junkSummary(0, 0, 0) == nil)
+  check("visit grays", ns.visitLine(3, 450) == "sold 3 items for 4s 50c")
+  check("visit single", ns.visitLine(1, 0) == "sold 1 item for 0c")
+  check("visit mixed", ns.visitLine(3, 1450) == "sold 3 items for 14s 50c")
+  check("visit nothing", ns.visitLine(0, 0) == nil)
 end
 
--- 3. MERCHANT_SHOW auto-sells junk and announces the take.
+-- 2c. Identical junk merges by item ID into summary groups with summed
+-- quantity and total; links without a known ID merge by link.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  local a = "item:mergeA"
+  local b = "item:mergeB"
+  w.itemIDs[a], w.itemIDs[b] = 501, 502
+  local groups = ns.mergeByID({
+    { link = a, price = 100 }, { link = b, price = 50 },
+    { link = a, price = 100 },
+  })
+  check("two groups", #groups == 2)
+  check("first-seen order", groups[1].link == a and groups[2].link == b)
+  check("summed quantity", groups[1].qty == 2)
+  check("summed total", groups[1].total == 200)
+  check("single row", ns.mergedLine(groups[2]) == "  " .. b .. " for 50c")
+  check("merged row", ns.mergedLine(groups[1]) == "  2x " .. a .. " for 2s 0c")
+  check("itemID known", ns.itemID(a) == 501)
+  check("itemID unknown", ns.itemID("item:ghost") == nil)
+end
+
+-- 3. The sale happens on MERCHANT_SHOW; the one deferred line for the
+-- visit lands on MERCHANT_CLOSED.
 do
   local w = newWorld()
   w.junkCount = 3
@@ -354,7 +425,9 @@ do
   clientLoaded(w)
   w.frame.onEvent(nil, "MERCHANT_SHOW")
   check("junk sold", w.junkSold == true)
-  check("junk announce", w.printed[1] == "|cff66ccffVocVendor|r: sold 3 junk for 4s 50c")
+  check("no chat before close", #w.printed == 0)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("one line for the visit", w.printed[1] == "|cff66ccffVocVendor|r: sold 3 items for 4s 50c")
 end
 
 -- 4. Junk sells before repair, so the proceeds can pay for it.
@@ -587,8 +660,10 @@ do
   w.frame.onEvent(nil, "MERCHANT_SHOW")
   check("grays sold", w.junkSold == true)
   check("old gear sold", #w.sold == 1)
-  check("combined announce",
-    w.printed[1] == "|cff66ccffVocVendor|r: sold 2 junk, 1 old gear for 14s 50c")
+  check("silent before close", #w.printed == 0)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("one line for both piles",
+    w.printed[1] == "|cff66ccffVocVendor|r: sold 3 items for 14s 50c")
 end
 
 -- 19. Native button hook: installs once, preserves Blizzard's click.
@@ -638,8 +713,9 @@ do
   w.hookedClick.OnClick(w.env.MerchantSellAllJunkButton)
   check("dry-run header",
     w.printed[1] == "|cff66ccffVocVendor|r: junk to sell (3 gray, 2 old gear):")
-  check("dry-run lists links",
-    w.printed[2] == "  " .. old1 and w.printed[3] == "  " .. old2)
+  check("dry-run merges by item",
+    w.printed[2] == "  " .. old1 .. " for 12s 0c"
+    and w.printed[3] == "  " .. old2 .. " for 8s 0c")
   check("one popup", #w.popups == 1)
   check("popup count", w.popups[1].a == 5)
   check("popup total", w.popups[1].b == "20s 0c")
@@ -672,8 +748,13 @@ do
   check("grays sold on confirm", w.junkSold == true)
   check("only matching slot sold", #w.sold == 1)
   check("right slot sold", w.sold[1].bag == b1 and w.sold[1].slot == s1)
-  check("confirm announce",
-    w.printed[1] == "|cff66ccffVocVendor|r: sold 2 junk, 1 old gear for 14s 50c")
+  check("moved slot listed with reason",
+    w.printed[1] == "|cff66ccffVocVendor|r: couldn't sell 1 item:"
+    and w.printed[2] == "  " .. old2 .. " (moved)")
+  check("silent before close", #w.printed == 2)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("deferred confirm line",
+    w.printed[3] == "|cff66ccffVocVendor|r: sold 3 items for 14s 50c")
 end
 
 -- 23. refreshJunkButton: enabled with old gear but no grays, off when empty.
@@ -719,7 +800,8 @@ do
   clientLoaded(w)
   w.env.SlashCmdList.VOCVENDOR("off")
   check("auto-sell off", ns.opts().autoSell == false)
-  check("off announce", w.printed[1] == "|cff66ccffVocVendor|r: auto-sell junk off")
+  check("off announce names the re-enable command",
+    w.printed[1] == "|cff66ccffVocVendor|r: auto-sell junk off (turn back on with /vv on)")
   check("off confirms with the checkbox pair (fallback: no OFF constant in the stub)",
     w.playedSounds[1] == 857)
   w.env.SlashCmdList.VOCVENDOR("on")
@@ -752,9 +834,11 @@ do
   check("autoSell setting", w.env.Settings and w.settingsReg["VocVendor_autoSell"] ~= nil)
   check("gap slider", w.settingsSliders == 1)
   check("gap default", w.settingsReg["VocVendor_oldGearIlvlGap"].default == 30)
-  check("checkboxes", w.settingsChecks == 8)
+  check("checkboxes", w.settingsChecks == 9)
   check("keep disenchantable setting", w.settingsReg["VocVendor_keepDisenchantable"] ~= nil)
   check("keep default", w.settingsReg["VocVendor_keepDisenchantable"].default == true)
+  check("compare setting", w.settingsReg["VocVendor_compareAuction"] ~= nil)
+  check("compare default", w.settingsReg["VocVendor_compareAuction"].default == true)
 end
 
 -- 28. Compartment click opens the addon's Settings category.
@@ -811,7 +895,9 @@ do
   ns.opts().announce = false
   w.frame.onEvent(nil, "MERCHANT_SHOW")
   check("sell sound without announce", w.playedSounds[1] == 856)
-  check("no chat without announce", #w.printed == 0)
+  check("no chat before close", #w.printed == 0)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("no chat after close when unannounced", #w.printed == 0)
 end
 
 -- 30. Popup confirm plays the numeric fallback when SOUNDKIT renames.
@@ -927,8 +1013,9 @@ do
   check("nothing kept when toggled off", #ns.collectKeptDisenchantables() == 0)
   w.frame.onEvent(nil, "MERCHANT_SHOW")
   check("old gear sold when toggled off", #w.sold == 1)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
   check("sold announce, no kept line",
-    #w.printed == 1 and w.printed[1] == "|cff66ccffVocVendor|r: sold 1 old gear for 10s 0c")
+    #w.printed == 1 and w.printed[1] == "|cff66ccffVocVendor|r: sold 1 item for 10s 0c")
   check("no disenchant window without kept gear",
     ns.deWindow == nil or not ns.deWindow:IsShown())
 end
@@ -946,7 +1033,9 @@ do
   check("nothing kept for non-enchanter", #ns.collectKeptDisenchantables() == 0)
   w.frame.onEvent(nil, "MERCHANT_SHOW")
   check("old gear still sells", #w.sold == 1)
-  check("no kept line", #w.printed == 1)
+  check("silent before close", #w.printed == 0)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("one line, no kept line", #w.printed == 1)
   check("no disenchant window for non-enchanters",
     ns.deWindow == nil or not ns.deWindow:IsShown())
 end
@@ -1043,7 +1132,7 @@ do
   w.hookedClick.OnClick(w.env.MerchantSellAllJunkButton)
   check("dry-run sells only the common",
     w.printed[1] == "|cff66ccffVocVendor|r: junk to sell (0 gray, 1 old gear):")
-  check("dry-run lists the common", w.printed[2] == "  " .. commonOld)
+  check("dry-run merges the common", w.printed[2] == "  " .. commonOld .. " for 12s 0c")
   check("dry-run opens the disenchant window", ns.deWindow ~= nil and ns.deWindow:IsShown())
   check("window lists only the kept epic", #ns.deRows == 1)
   check("no kept chat beside the window", #w.printed == 2)
@@ -1064,8 +1153,10 @@ do
   w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
   putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300 }))
   ns.sellJunkNow({ grayCount = 2, oldGear = {} })
-  check("confirm sold line first",
-    w.printed[1] == "|cff66ccffVocVendor|r: sold 2 junk for 4s 50c")
+  check("confirm stays silent before close", #w.printed == 0)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("confirm line deferred to close",
+    w.printed[1] == "|cff66ccffVocVendor|r: sold 2 items for 4s 50c")
   check("confirm opens the window for kept gear",
     ns.deWindow ~= nil and ns.deWindow:IsShown())
   check("confirm lists the kept item", #ns.deRows == 1)
@@ -1280,6 +1371,313 @@ do
   w.noContainerInfo = true -- GetContainerItemInfo returns nothing
   check("missing value API keeps the item", ns.slotHasValue(0, 1) == false)
   check("nothing collected without the API", #ns.collectJunk().oldGear == 0)
+end
+
+-- 52. A failing click halts the loop: the failing item and everything
+-- after it come back as leftovers with per-row reasons, and nothing
+-- later is even attempted.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local first = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  local bad = gear(w, { slot = "INVTYPE_HEAD", level = 310, price = 1000 })
+  local after = gear(w, { slot = "INVTYPE_HEAD", level = 320, price = 1000 })
+  local b1, s1 = putBag(w, first)
+  local b2, s2 = putBag(w, bad)
+  local b3, s3 = putBag(w, after)
+  w.sellErrors[b2 .. ":" .. s2] = true -- the click errors
+  local n, value, leftover = ns.sellOldGearItems({
+    { link = first, bag = b1, slot = s1, price = 1000 },
+    { link = bad, bag = b2, slot = s2, price = 1000 },
+    { link = after, bag = b3, slot = s3, price = 1000 },
+  })
+  check("one sold before the failure", n == 1 and value == 1000)
+  check("loop halted at the failure", #w.sold == 1)
+  check("failing item listed", leftover[1].link == bad)
+  check("failing reason", leftover[1].reason == "sell failed")
+  check("rest listed as stopped",
+    #leftover == 2 and leftover[2].link == after
+    and leftover[2].reason == "sale stopped")
+  ns.reportLeftover(leftover)
+  check("leftover header",
+    w.printed[1] == "|cff66ccffVocVendor|r: couldn't sell 2 items:")
+  check("leftover rows name reasons",
+    w.printed[2] == "  " .. bad .. " (sell failed)"
+    and w.printed[3] == "  " .. after .. " (sale stopped)")
+  check("empty leftover stays silent",
+    (function() local before = #w.printed ns.reportLeftover({}) return #w.printed == before end)())
+end
+
+-- 53. An item the click leaves behind halts too, without retrying.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local stuck = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  local sb, ss = putBag(w, stuck)
+  w.stuck[sb .. ":" .. ss] = true -- sold but still in the slot
+  local n, _, leftover = ns.sellOldGearItems({
+    { link = stuck, bag = sb, slot = ss, price = 1000 },
+  })
+  check("stuck item not counted", n == 0)
+  check("no retry", #w.sold == 1)
+  check("stuck reason", #leftover == 1 and leftover[1].reason == "still in bags")
+end
+
+-- 54. Collection gate: uncollected appearances, toys, and pets never
+-- count as old gear. Collected ones sell like anything else.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local cosmetic = gear(w, { slot = "INVTYPE_HEAD", level = 300 })
+  w.cosmetic[w.itemIDs[cosmetic]] = true
+  w.noTransmog[cosmetic] = true
+  check("unknown appearance kept", ns.isUncollectedCollectible(cosmetic) == true)
+  check("unknown appearance never old gear", ns.isOldGear(cosmetic, 30) == false)
+  w.noTransmog[cosmetic] = nil -- appearance learned since
+  check("known appearance sells", ns.isOldGear(cosmetic, 30) == true)
+  local toy = gear(w, { slot = "INVTYPE_HEAD", level = 300 })
+  w.toyInfo[w.itemIDs[toy]] = 1 -- the toy journal knows this item
+  check("unowned toy kept", ns.isUncollectedCollectible(toy) == true)
+  w.ownedToys[w.itemIDs[toy]] = true
+  check("owned toy sells", ns.isUncollectedCollectible(toy) == false)
+  local pet = gear(w, { slot = "INVTYPE_HEAD", level = 300 })
+  w.petSpecies[w.itemIDs[pet]] = 77
+  check("uncollected pet kept", ns.isUncollectedCollectible(pet) == true)
+  check("uncollected pet never old gear", ns.isOldGear(pet, 30) == false)
+  w.petOwned[77] = true -- duplicate of a collected pet
+  check("collected pet sells", ns.isUncollectedCollectible(pet) == false)
+  check("ordinary gear unaffected", ns.isUncollectedCollectible(
+    gear(w, { slot = "INVTYPE_HEAD", level = 300 })) == false)
+end
+
+-- 55. Collection gate fails closed: a missing or broken API keeps.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local link = gear(w, { slot = "INVTYPE_HEAD", level = 300 })
+  w.env.C_TransmogCollection = nil
+  w.cosmetic[w.itemIDs[link]] = true
+  check("missing appearance API keeps", ns.isUncollectedCollectible(link) == true)
+  w.env.C_TransmogCollection = { PlayerHasTransmogByItemInfo = function() error("boom") end }
+  check("erroring appearance API keeps", ns.isUncollectedCollectible(link) == true)
+end
+
+-- 56. Rival detection: a loaded same-job addon warns once and pauses
+-- auto-sell, naming the exact re-enable command.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  w.loadedAddons.Scrap = true
+  clientLoaded(w) -- ADDON_LOADED fires the check
+  check("rival found", ns.findRival() == "Scrap")
+  check("rival pauses auto-sell", ns.opts().autoSell == false)
+  check("rival names the re-enable",
+    w.printed[1] == "|cff66ccffVocVendor|r: Scrap also sells junk: auto-sell paused (turn back on with /vv on)")
+  w.frame.onEvent(nil, "PLAYER_LOGIN")
+  check("warned once", #w.printed == 1)
+  w.env.SlashCmdList.VOCVENDOR("on") -- the player takes it back
+  check("re-enable works", ns.opts().autoSell == true)
+  check("still warned once", #w.printed == 2)
+end
+
+-- 57. No rival, no warning, nothing touched.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.frame.onEvent(nil, "PLAYER_LOGIN")
+  check("no rival", ns.findRival() == nil)
+  check("auto-sell untouched", ns.opts().autoSell == true)
+  check("silent without rival", #w.printed == 0)
+end
+
+-- 58. Two visits, two lines: the visit count resets on close.
+do
+  local w = newWorld()
+  w.junkCount = 1
+  w.junkValue = 100
+  w.repairCan = false
+  loadAddon(w)
+  clientLoaded(w)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("first visit one line",
+    #w.printed == 1 and w.printed[1] == "|cff66ccffVocVendor|r: sold 1 item for 1s 0c")
+  w.junkCount = 2
+  w.junkValue = 50
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("second visit one line",
+    #w.printed == 2 and w.printed[2] == "|cff66ccffVocVendor|r: sold 2 items for 50c")
+end
+
+-- 59. Auction math: net-of-cut comparison across vendor, auction, disenchant.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  check("net cuts 5 percent", ns.auctionNet(100) == 95)
+  check("net floors", ns.auctionNet(101) == 95)
+  check("net zero", ns.auctionNet(0) == 0)
+  check("net nil", ns.auctionNet(nil) == 0)
+  check("no data vendors", ns.compareItem(1000, nil, nil) == "vendor")
+  check("tie vendors", ns.compareItem(1000, 1052, nil) == "vendor")
+  check("auction wins", ns.compareItem(1000, 2000, nil) == "auction")
+  check("losing auction vendors", ns.compareItem(1000, 500, nil) == "vendor")
+  check("disenchant wins", ns.compareItem(1000, nil, 2000) == "disenchant")
+  check("best of three disenchant", ns.compareItem(1000, 2000, 3000) == "disenchant")
+  check("best of three auction", ns.compareItem(1000, 3000, 2000) == "auction")
+end
+
+-- 60. Price providers: Auctionator first, then TSM, then Oribos; broken
+-- guests never break the lookup.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  w.itemIDs["item:priced"] = 777
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function(_, id) return id == 777 and 3000 or nil end,
+    GetAuctionPriceByItemLink = function() return 2500 end,
+  } } }
+  check("auctionator by ID", ns.getAuctionPrice("item:priced") == 3000)
+  w.env.Auctionator.API.v1.GetAuctionPriceByItemID = nil
+  check("auctionator by link", ns.getAuctionPrice("item:priced") == 2500)
+  w.env.Auctionator.API.v1.GetAuctionPriceByItemLink = function() error("boom") end
+  w.env.TSM_API = {
+    ToItemString = function(link) return "i:" .. link end,
+    GetCustomPriceValue = function() return 2000 end,
+  }
+  check("erroring guest falls through to TSM", ns.getAuctionPrice("item:priced") == 2000)
+  w.env.TSM_API.ToItemString = function() error("boom") end
+  w.env.OEMarketInfo = function(link, info) info.market = 1500 end
+  check("broken TSM falls through to Oribos", ns.getAuctionPrice("item:priced") == 1500)
+  w.env.OEMarketInfo = function() error("boom") end
+  check("all broken means no opinion", ns.getAuctionPrice("item:priced") == nil)
+  check("no guests means no opinion", ns.getAuctionPrice("item:ghost") == nil)
+end
+
+-- 61. Disenchant value comes from Auctionator's DE data, guarded too.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  check("no DE data", ns.getDisenchantValue("item:de") == nil)
+  w.itemIDs["item:de"] = 888
+  w.env.Auctionator = { API = { v1 = {
+    GetDisenchantPriceByItemLink = function() return 4000 end,
+  } } }
+  check("DE by link", ns.getDisenchantValue("item:de") == 4000)
+  w.env.Auctionator.API.v1.GetDisenchantPriceByItemLink = function() error("boom") end
+  check("broken DE guarded", ns.getDisenchantValue("item:de") == nil)
+end
+
+-- 62. The vendor sale skips whatever the auction math favors, and says why.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local seq = 9000
+  local function stock(link, price)
+    seq = seq + 1
+    w.itemIDs[link] = seq
+    w.slots[link] = "INVTYPE_HEAD"
+    w.classIDs[link] = 4
+    w.rarities[link] = 2
+    w.levels[link] = 100
+    w.prices[link] = price
+    w.bindTypes[link] = 1
+    w.bags[0] = w.bags[0] or {}
+    w.bags[0][#w.bags[0] + 1] = link
+    return 0, #w.bags[0]
+  end
+  local bagA, slotA = stock("item:aucwin", 1000)
+  local bagB, slotB = stock("item:vendorwin", 1000)
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function(_, id)
+      if id == w.itemIDs["item:aucwin"] then return 5000 end
+      return nil
+    end,
+  } } }
+  local n, value, leftover = ns.sellOldGearItems({
+    { link = "item:aucwin", bag = bagA, slot = slotA, price = 1000 },
+    { link = "item:vendorwin", bag = bagB, slot = slotB, price = 1000 },
+  })
+  check("auction-better skipped", n == 1 and value == 1000)
+  check("skip names the reason",
+    #leftover == 1 and leftover[1].reason:find("auction worth more", 1, true) ~= nil)
+  check("skip shows the net",
+    leftover[1].reason:find("47s 50c net", 1, true) ~= nil)
+  check("rest sold", #w.sold == 1)
+end
+
+-- 63. A disenchant net above vendor also holds the item back.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.itemIDs["item:dewin"] = 9201
+  w.slots["item:dewin"] = "INVTYPE_HEAD"
+  w.classIDs["item:dewin"] = 4
+  w.rarities["item:dewin"] = 2
+  w.levels["item:dewin"] = 100
+  w.prices["item:dewin"] = 1000
+  w.bindTypes["item:dewin"] = 1
+  w.bags[0] = { "item:dewin" }
+  w.env.Auctionator = { API = { v1 = {
+    GetDisenchantPriceByItemID = function() return 5000 end,
+  } } }
+  local n, _, leftover = ns.sellOldGearItems({
+    { link = "item:dewin", bag = 0, slot = 1, price = 1000 },
+  })
+  check("de-better skipped",
+    n == 0 and #leftover == 1
+    and leftover[1].reason:find("disenchant worth more", 1, true) ~= nil)
+end
+
+-- 64. compareAuction off sells everything the vendor buys, like before.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().compareAuction = false
+  w.itemIDs["item:plain"] = 9301
+  w.bags[0] = { "item:plain" }
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return 50000 end,
+  } } }
+  local n, _, leftover = ns.sellOldGearItems({
+    { link = "item:plain", bag = 0, slot = 1, price = 100 },
+  })
+  check("opt-out sells", n == 1 and #leftover == 0)
+end
+
+-- 65. Kept gear worth more on the auction gets a hint line.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.itemIDs["item:keephint"] = 9101
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return 5000 end,
+    GetDisenchantPriceByItemLink = function() return 1000 end,
+  } } }
+  local hints = ns.keptAuctionHints({ { link = "item:keephint" } })
+  check("hint listed",
+    #hints == 1 and hints[1]:find("47s 50c net on auction", 1, true) ~= nil)
+  w.env.Auctionator.API.v1.GetDisenchantPriceByItemLink = function() return 9000 end
+  check("de-better silent",
+    #ns.keptAuctionHints({ { link = "item:keephint" } }) == 0)
+  ns.opts().compareAuction = false
+  check("opt-out silent",
+    #ns.keptAuctionHints({ { link = "item:keephint" } }) == 0)
 end
 
 print("ok - " .. passed .. " checks passed")

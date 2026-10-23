@@ -31,7 +31,7 @@ skill, then copy it to every repo.
 4. **Guests, not dependencies.** Other addons are always optional.
    Every external call is presence-gated and `pcall`-guarded; a broken
    neighbor never breaks us. Suites that skin the UI are adopted when
-   present and never required.
+   present and never required. Shims that reach out to another addon (brokers, overlays) are owned by the Voc repo, reuse its own entry points, and stay presence-gated like any other guest call. Behavior other authors can rely on lives behind documented ns.* functions: that namespace is the stable surface.
 5. **Settings apply live.** Changing an option in the panel or on the
    slash line takes effect immediately, with no reload.
 6. **Stock first.** Default chrome is Blizzard's own, so the addon
@@ -264,6 +264,8 @@ the addon does, one muted line teaching the slash command. The three
 globals are the only ones the compartment needs and they carry the
 addon prefix like every other global.
 
+Disabling from the compartment prints the re-enable command in chat, so the way back is one click away. Every entry point honors the player's click preference the same way; no entry point invents its own gesture.
+
 ## Settings
 
 - Account-wide SavedVariables holding a flat table of options.
@@ -271,6 +273,9 @@ addon prefix like every other global.
   keys are filled, and any key holding the wrong type or an
   out-of-range value is reset to its default. Unknown keys are left
   alone for forward compatibility.
+- Child options gate on their parent: when the parent is off, children show disabled, never hidden, with the reason visible on the row.
+- Features forced on or off label themselves as such in the panel; the label names the decider (client version, missing API).
+- A conditional section header shares one predicate with its widgets, so the header never disagrees with what sits under it.
 - The panel is a native Blizzard Settings category registered with
   `Settings.RegisterVerticalLayoutCategory("<Name>")`, built from
   `Settings.RegisterAddOnSetting` plus `CreateCheckbox`,
@@ -284,6 +289,7 @@ addon prefix like every other global.
   panel says so.
 - `/<short> config` opens the category; when the Settings API is
   missing it says where to find the panel instead of erroring.
+- No search or sort UI while the options fit on one screen; the panel stays a short list that reads top to bottom.
 
 ## Repository layout
 
