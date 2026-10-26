@@ -128,10 +128,25 @@ function ns.auctionNet(price)
   if price <= 0 then return 0 end
   return math.floor(price * (1 - ns.AH_CUT))
 end
-function ns.getAuctionPrice(link, itemID)
+-- Guest price handles, resolved once per sale loop: presence is constant
+-- for a visit, so per-item lookups reuse one resolution. Direct calls
+-- resolve live, so late-loading guests just work.
+function ns.priceGuests()
+  local guests = {}
+  local api = type(Auctionator) == "table" and Auctionator.API and Auctionator.API.v1 or nil
+  if type(api) == "table" then guests.auctionator = api end
+  if type(TSM_API) == "table" and type(TSM_API.GetCustomPriceValue) == "function"
+    and type(TSM_API.ToItemString) == "function" then
+    guests.tsm = TSM_API
+  end
+  if type(OEMarketInfo) == "function" then guests.oribos = OEMarketInfo end
+  return guests
+end
+function ns.getAuctionPrice(link, itemID, guests)
   if not link and not itemID then return nil end
   if not itemID and link then itemID = ns.itemID(link) end
-  local api = type(Auctionator) == "table" and Auctionator.API and Auctionator.API.v1 or nil
+  guests = guests or ns.priceGuests()
+  local api = guests.auctionator
   if api then
     if itemID and type(api.GetAuctionPriceByItemID) == "function" then
       local ok, price = pcall(api.GetAuctionPriceByItemID, "VocVendor", itemID)
@@ -142,16 +157,16 @@ function ns.getAuctionPrice(link, itemID)
       if ok and type(price) == "number" and price > 0 then return price end
     end
   end
-  if type(TSM_API) == "table" and type(TSM_API.GetCustomPriceValue) == "function" and type(TSM_API.ToItemString) == "function" and link then
-    local okStr, itemStr = pcall(TSM_API.ToItemString, link)
+  if guests.tsm and link then
+    local okStr, itemStr = pcall(guests.tsm.ToItemString, link)
     if okStr and itemStr then
-      local ok, price = pcall(TSM_API.GetCustomPriceValue, "DBMarket", itemStr)
+      local ok, price = pcall(guests.tsm.GetCustomPriceValue, "DBMarket", itemStr)
       if ok and type(price) == "number" and price > 0 then return price end
     end
   end
-  if type(OEMarketInfo) == "function" then
+  if guests.oribos then
     local info = {}
-    local ok = pcall(OEMarketInfo, link or itemID, info)
+    local ok = pcall(guests.oribos, link or itemID, info)
     if ok and type(info) == "table" then
       if tonumber(info.market) and info.market > 0 then return info.market end
       if tonumber(info.region) and info.region > 0 then return info.region end
@@ -159,10 +174,11 @@ function ns.getAuctionPrice(link, itemID)
   end
   return nil
 end
-function ns.getDisenchantValue(link, itemID)
+function ns.getDisenchantValue(link, itemID, guests)
   if not link and not itemID then return nil end
   if not itemID and link then itemID = ns.itemID(link) end
-  local api = type(Auctionator) == "table" and Auctionator.API and Auctionator.API.v1 or nil
+  guests = guests or ns.priceGuests()
+  local api = guests.auctionator
   if api then
     if link and type(api.GetDisenchantPriceByItemLink) == "function" then
       local ok, price = pcall(api.GetDisenchantPriceByItemLink, "VocVendor", link)
@@ -258,6 +274,7 @@ end
 function ns.sellOldGearItems(items)
   local n, value = 0, 0
   local leftover = {}
+  local guests = ns.priceGuests()
   if type(C_Container) ~= "table" then return n, value, leftover end
   if type(C_Container.GetContainerItemLink) ~= "function" then return n, value, leftover end
   items = items or {}
@@ -270,8 +287,8 @@ function ns.sellOldGearItems(items)
     elseif not ns.slotHasValue(it.bag, it.slot) then
       reason = "vendor won't buy"
     elseif ns.opts().compareAuction then
-      local auction = ns.getAuctionPrice(it.link)
-      local deValue = ns.isDisenchantable(it.link) and ns.getDisenchantValue(it.link) or nil
+      local auction = ns.getAuctionPrice(it.link, nil, guests)
+      local deValue = ns.isDisenchantable(it.link) and ns.getDisenchantValue(it.link, nil, guests) or nil
       local verdict = ns.compareItem(it.price, auction, deValue)
       if verdict == "auction" then
         reason = "auction worth more (" .. ns.moneyString(ns.auctionNet(auction)) .. " net)"
@@ -468,11 +485,27 @@ function ns.refreshJunkButton()
     and not MerchantSellAllJunkButton:IsShown() then
     return
   end
-  local junk = ns.collectJunk()
-  local has = junk.grayCount > 0 or #junk.oldGear > 0
-  if type(MerchantSellAllJunkButton.SetEnabled) == "function" then
-    MerchantSellAllJunkButton:SetEnabled(has)
+  local setEnabled = function(on)
+    if type(MerchantSellAllJunkButton.SetEnabled) == "function" then
+      MerchantSellAllJunkButton:SetEnabled(on)
+    end
   end
+  -- Grays alone enable the button: one Blizzard call decides it, and the
+  -- old-gear bag scan runs only when grays are absent and old gear counts.
+  if type(C_MerchantFrame) == "table"
+    and type(C_MerchantFrame.GetNumJunkItems) == "function" then
+    local ok, n = pcall(C_MerchantFrame.GetNumJunkItems)
+    if ok and type(n) == "number" and n > 0 then
+      setEnabled(true)
+      return
+    end
+  end
+  if not ns.opts().junkOldGear then
+    setEnabled(false)
+    return
+  end
+  local junk = ns.collectJunk()
+  setEnabled(junk.grayCount > 0 or #junk.oldGear > 0)
 end
 
 -- Manual path (native button or /vv): same definition as auto-sell, but
@@ -630,11 +663,24 @@ end
 -- Fail closed: an unknown item, or a missing API, keeps the item.
 -- Every name here is verified against both clients (see AGENTS.md);
 -- each check is presence-gated so the gate degrades to keeping.
-function ns.isUncollectedCollectible(link)
+function ns.isUncollectedCollectible(link, memo)
   if type(C_Item) ~= "table" then return true end
   if type(C_Item.GetItemInfoInstant) ~= "function" then return true end
   local okInst, itemID = pcall(C_Item.GetItemInfoInstant, link)
   if not okInst or type(itemID) ~= "number" then return true end
+  -- Per-scan memo: appearance answers repeat per item ID, and they cannot
+  -- change mid-sweep. Only computed results memoize; unknown items still
+  -- fail closed every time.
+  if memo and memo[itemID] ~= nil then return memo[itemID] end
+  local known = ns.checkCollectible(itemID, link)
+  if memo then memo[itemID] = known end
+  return known
+end
+
+-- True when the item teaches something the player lacks: a transmog
+-- appearance, a toy, or a pet. Fail closed: an unknown item, or a
+-- missing API, keeps the item.
+function ns.checkCollectible(itemID, link)
   local cosmetic = false
   if type(C_Item.IsCosmeticItem) == "function" then
     local ok, v = pcall(C_Item.IsCosmeticItem, itemID)
@@ -681,8 +727,8 @@ function ns.isUncollectedCollectible(link)
   end
   return false
 end
-function ns.isOldGear(link, gap, ignoreDE)
-  if ns.isUncollectedCollectible(link) then return false end
+function ns.isOldGear(link, gap, ignoreDE, scan)
+  if ns.isUncollectedCollectible(link, scan and scan.memo) then return false end
   local _, _, _, equipLoc, _, classID = C_Item.GetItemInfoInstant(link)
   if not equipLoc or equipLoc == "" then return false end
   if classID ~= Enum.ItemClass.Weapon and classID ~= Enum.ItemClass.Armor then
@@ -696,9 +742,11 @@ function ns.isOldGear(link, gap, ignoreDE)
   local o = ns.opts()
   if bindType == Enum.ItemBind.OnEquip and not o.oldGearBoE then return false end
   if ns.isWarbound(link) and not o.oldGearWarbound then return false end
-  if not ignoreDE and o.keepDisenchantable
-    and ns.canDisenchant() and ns.isDisenchantable(link) then
-    return false
+  if not ignoreDE and o.keepDisenchantable and ns.isDisenchantable(link) then
+    -- canDE is the per-scan hoist; nil resolves live for direct calls.
+    local canDE = scan and scan.canDE
+    if canDE == nil then canDE = ns.canDisenchant() end
+    if canDE then return false end
   end
   if ns.pawnSaysUpgrade(link) then return false end
   local slots = ns.slotPairs[equipLoc] or { ns.primarySlot[equipLoc] }
@@ -724,13 +772,16 @@ end
 function ns.collectOldGear()
   local gap = ns.opts().oldGearIlvlGap or 30
   local out = {}
+  -- Per-scan hoists: the enchanter gate is player-level, and collectible
+  -- lookups repeat per item ID, so resolve and memoize once per sweep.
+  local scan = { canDE = ns.canDisenchant(), memo = {} }
   for bag = 0, NUM_BAG_SLOTS do
     local slots = C_Container.GetContainerNumSlots(bag)
     for slot = 1, slots do
       local link = C_Container.GetContainerItemLink(bag, slot)
       if link and not ns.inEquipmentSet(bag, slot)
         and ns.slotHasValue(bag, slot)
-        and ns.isOldGear(link, gap) then
+        and ns.isOldGear(link, gap, nil, scan) then
         local _, _, _, _, _, _, _, _, _, _, sellPrice = C_Item.GetItemInfo(link)
         out[#out + 1] = { link = link, bag = bag, slot = slot,
           price = sellPrice or 0 }
@@ -750,12 +801,13 @@ function ns.collectKeptDisenchantables()
   if not ns.canDisenchant() then return {} end
   local gap = o.oldGearIlvlGap or 30
   local out = {}
+  local scan = { canDE = true, memo = {} }
   for bag = 0, NUM_BAG_SLOTS do
     local slots = C_Container.GetContainerNumSlots(bag)
     for slot = 1, slots do
       local link = C_Container.GetContainerItemLink(bag, slot)
       if link and not ns.inEquipmentSet(bag, slot)
-        and ns.isOldGear(link, gap, true)
+        and ns.isOldGear(link, gap, true, scan)
         and ns.isDisenchantable(link) then
         out[#out + 1] = { link = link, bag = bag, slot = slot }
       end
@@ -982,10 +1034,11 @@ end
 function ns.keptAuctionHints(kept)
   local hints = {}
   if not ns.opts().compareAuction then return hints end
+  local guests = ns.priceGuests()
   for _, it in ipairs(kept or {}) do
-    local auction = ns.getAuctionPrice(it.link)
+    local auction = ns.getAuctionPrice(it.link, nil, guests)
     if auction then
-      local deValue = ns.getDisenchantValue(it.link)
+      local deValue = ns.getDisenchantValue(it.link, nil, guests)
       if not deValue or ns.auctionNet(auction) > ns.auctionNet(deValue) then
         hints[#hints + 1] = "  " .. tostring(it.link) .. " worth " .. ns.moneyString(ns.auctionNet(auction)) .. " net on auction"
       end
