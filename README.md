@@ -48,6 +48,7 @@ Settings > AddOns > VocVendor, or `/vv config`:
 - Also sell Warbound (default off: alts can use it through the warbank)
 - Compare auction prices (default on: with Auctionator, TradeSkillMaster, or Oribos Exchange installed, gear worth more on the auction house is held back with its reason instead of sold)
 - Keep disenchantable gear (default on: enchanters disenchant it from the list instead of selling it)
+- Keep current-expansion gear (default on: gear from the current expansion never counts as old gear)
 
 Every change applies at once.
 
@@ -59,7 +60,7 @@ configured gap below everything you wear in that slot, never
 heirlooms, never anything in a saved equipment set, never anything
 Pawn flags as an upgrade when Pawn is
 installed, never BoE or Warbound unless you opt them in, and never an
-uncollected transmog appearance, toy, or pet. Each
+uncollected transmog appearance, toy, or pet, and never gear from the current expansion while its keep is on. Each
 candidate is re-checked by bag slot right before it sells, so a bag
 that shifted between the dry run and the click never sells the wrong
 item. When Auctionator, TradeSkillMaster, or Oribos Exchange is installed, old gear worth more on the auction house (sold directly, or disenchanted first, net of the 5% auction cut) is held back with its reason instead of sold. A sale that fails stops the run and lists what is left with the
@@ -70,7 +71,7 @@ Repairs mirror the merchant frame's own buttons: guild bank
 first when allowed, your gold otherwise, and only when you can pay.
 Gear kept for disenchanting (uncommon, rare, or epic, for enchanters) opens a
 click-to-disenchant window instead: one row per item, each click
-disenchants that bag slot, and the list tracks the bags until empty.
+disenchants that bag slot, and the list tracks the bags until empty. Moving items between bank and bags stays in VocWarbank (/vw Empty and Deposit); this addon only sells at the vendor.
 
 ## What's inside
 

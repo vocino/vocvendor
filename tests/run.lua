@@ -67,7 +67,7 @@ local function loadAddon(world)
       return link, link, world.rarities[link], world.levels[link],
         world.minLevels[link], nil, nil, nil, world.slots[link], nil,
         world.prices[link], world.classIDs[link], world.subclassIDs[link],
-        world.bindTypes[link], nil, world.setIDs[link], nil, nil
+        world.bindTypes[link], world.expansions[link], world.setIDs[link], nil, nil
     end,
     GetDetailedItemLevelInfo = function(link) return world.levels[link] end,
     IsItemBindToAccountUntilEquip = function(link) return world.warbound[link] == true end,
@@ -289,7 +289,7 @@ local function newWorld()
   return {
     bags = {}, slots = {}, minLevels = {}, levels = {}, classIDs = {},
     subclassIDs = {}, rarities = {}, prices = {}, bindTypes = {},
-    setIDs = {}, itemIDs = {}, uncached = {}, warbound = {}, equipSets = {},
+    setIDs = {}, itemIDs = {}, uncached = {}, warbound = {}, equipSets = {}, expansions = {},
     equipped = {}, printed = {}, frames = {}, gametip = { lines = {} },
     money = 100000, junkCount = 0, junkValue = 0, junkSold = false,
     sold = {}, repairs = {}, popups = {},
@@ -329,6 +329,9 @@ local function gear(w, o)
   w.minLevels[link] = 1
   w.prices[link] = o.price or 1000
   w.bindTypes[link] = o.bindType or 1 -- BoP
+  -- Previous expansion by default, so existing sell-expectations hold;
+  -- pass expansion = 11 for current-expansion (Midnight) gear.
+  w.expansions[link] = o.expansion or 10
   if o.warbound then w.warbound[link] = true end
   return link
 end
@@ -352,6 +355,7 @@ do
   check("default gap", o.oldGearIlvlGap == 30)
   check("default BoE excluded", o.oldGearBoE == false)
   check("default Warbound excluded", o.oldGearWarbound == false)
+  check("default keep current expansion", o.keepCurrentExpansion == true)
   check("default keep disenchantable", o.keepDisenchantable == true)
   check("default compareAuction", o.compareAuction == true)
 end
@@ -834,7 +838,9 @@ do
   check("autoSell setting", w.env.Settings and w.settingsReg["VocVendor_autoSell"] ~= nil)
   check("gap slider", w.settingsSliders == 1)
   check("gap default", w.settingsReg["VocVendor_oldGearIlvlGap"].default == 30)
-  check("checkboxes", w.settingsChecks == 9)
+  check("checkboxes", w.settingsChecks == 10)
+  check("current-expansion setting", w.settingsReg["VocVendor_keepCurrentExpansion"] ~= nil)
+  check("current-expansion default", w.settingsReg["VocVendor_keepCurrentExpansion"].default == true)
   check("keep disenchantable setting", w.settingsReg["VocVendor_keepDisenchantable"] ~= nil)
   check("keep default", w.settingsReg["VocVendor_keepDisenchantable"].default == true)
   check("compare setting", w.settingsReg["VocVendor_compareAuction"] ~= nil)
@@ -1678,6 +1684,30 @@ do
   ns.opts().compareAuction = false
   check("opt-out silent",
     #ns.keptAuctionHints({ { link = "item:keephint" } }) == 0)
+end
+
+-- 66. Current-expansion gear is never old gear, even far below the
+-- equipped piece. Older expansions sell like before; unknown keeps.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local current = gear(w, { slot = "INVTYPE_HEAD", level = 300, expansion = 11 })
+  local older = gear(w, { slot = "INVTYPE_HEAD", level = 300, expansion = 10 })
+  local unknown = gear(w, { slot = "INVTYPE_HEAD", level = 300 })
+  w.expansions[unknown] = nil
+  check("current expansion kept", ns.isOldGear(current, 30) == false)
+  check("older expansion sells", ns.isOldGear(older, 30) == true)
+  check("unknown expansion keeps", ns.isOldGear(unknown, 30) == false)
+  check("expansion helper reads the ID", ns.expansionID(current) == 11)
+  check("expansion helper nil when unknown", ns.expansionID(unknown) == nil)
+  check("current helper true", ns.isCurrentExpansion(current) == true)
+  check("current helper false for older", ns.isCurrentExpansion(older) == false)
+  ns.opts().keepCurrentExpansion = false
+  check("opt-out sells current too", ns.isOldGear(current, 30) == true)
+  check("helper off", ns.isCurrentExpansion(current) == false)
 end
 
 print("ok - " .. passed .. " checks passed")

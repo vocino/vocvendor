@@ -76,6 +76,7 @@ local COLORS = ns.COLORS
 -- and what the native button's tooltip promises). Old gear joins the
 -- definition only when the player opts in: then it sells automatically
 -- AND on the Sell Junk button, so the default stays safe.
+-- Current-expansion gear never joins, whatever the toggles say.
 local defaults = {
   autoSell = true,        -- sell junk on every vendor visit
   autoRepair = true,      -- repair on every vendor visit
@@ -85,6 +86,7 @@ local defaults = {
   oldGearIlvlGap = 30,    -- ...when this far below equipped
   oldGearBoE = false,     -- include Bind on Equip in old gear
   oldGearWarbound = false,-- include Warbound in old gear
+  keepCurrentExpansion = true,
   keepDisenchantable = true,
   compareAuction = true,  -- skip vendor sale when auction nets more
 }
@@ -588,6 +590,29 @@ function ns.isWarbound(link)
   return ok and warbound == true
 end
 
+-- Current-expansion keep-gate (VocWarbank's rule 3, narrowed to the
+-- vendor's job): gear from the expansion you are playing is never
+-- junk, no matter how far below the equipped piece it sits. The
+-- expansion ID is the item's own data (C_Item.GetItemInfo return 15,
+-- verified against Blizzard's generated docs on live and forever);
+-- the current ID is a named constant bumped per expansion. Fail
+-- closed: an unknown item, or an uncached one, counts as current and
+-- keeps. Grays are unaffected: Blizzard's own sale takes them all.
+ns.CURRENT_EXPANSION_ID = 11 -- Midnight (ExpansionLevel Midnight = 11)
+function ns.expansionID(link)
+  if type(C_Item) ~= "table" then return nil end
+  if type(C_Item.GetItemInfo) ~= "function" then return nil end
+  local r = { pcall(C_Item.GetItemInfo, link) }
+  if not r[1] then return nil end
+  return tonumber(r[16]) -- 15th return, past the pcall flag
+end
+function ns.isCurrentExpansion(link)
+  if not ns.opts().keepCurrentExpansion then return false end
+  local id = ns.expansionID(link)
+  if id == nil then return true end
+  return id >= ns.CURRENT_EXPANSION_ID
+end
+
 -- Enchanter gate: true when the player knows any Disenchant spell.
 -- Presence-gated and fail closed: without the API nothing counts as
 -- kept for disenchanting, so sales behave as if the toggle were off.
@@ -742,6 +767,9 @@ function ns.isOldGear(link, gap, ignoreDE, scan)
   local o = ns.opts()
   if bindType == Enum.ItemBind.OnEquip and not o.oldGearBoE then return false end
   if ns.isWarbound(link) and not o.oldGearWarbound then return false end
+  -- Current-expansion gear keeps (BoE follows the BoE toggle above,
+  -- mirroring VocWarbank: priced BoEs sell, non-BoE gear keeps).
+  if bindType ~= Enum.ItemBind.OnEquip and ns.isCurrentExpansion(link) then return false end
   if not ignoreDE and o.keepDisenchantable and ns.isDisenchantable(link) then
     -- canDE is the per-scan hoist; nil resolves live for direct calls.
     local canDE = scan and scan.canDE
@@ -1104,6 +1132,8 @@ function ns.ensureSettings()
     "Skip vendor sale when auction data says the auction house or disenchanting nets more. Needs Auctionator, TradeSkillMaster, or Oribos Exchange.")
   check("keepDisenchantable", "Keep disenchantable gear",
     "Enchanters only: keep gear you could disenchant out of junk sales. Off sells it with junk like any other old gear.")
+  check("keepCurrentExpansion", "Keep current-expansion gear",
+    "Never count gear from the current expansion as old gear, even far below your equipped pieces. Off sells it like any other old gear.")
   ns.settingsBuilt = true
   ns.settingsCategory = category
 end
