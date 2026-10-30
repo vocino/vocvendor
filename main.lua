@@ -75,8 +75,30 @@ local COLORS = ns.COLORS
 -- The junk definition. Grays are always junk (Blizzard's own baseline,
 -- and what the native button's tooltip promises). Old gear joins the
 -- definition only when the player opts in: then it sells automatically
--- AND on the Sell Junk button, so the default stays safe.
--- Current-expansion gear never joins, whatever the toggles say.
+-- AND on the Sell Junk button, so the default stays safe. Checked
+-- expansions join the same way, per expansion, across every item type:
+-- whatever the vendor buys from a checked expansion sells. Dead
+-- leftovers the vendor refuses (dead quest items, artifact-power
+-- tokens) collect in the delete list instead, one confirm per item.
+--
+-- The expansion checklist. One opt-in row per expansion, all off:
+-- checking an expansion vendors every vendorable item from it. IDs are
+-- Blizzard's own expansion IDs (ExpansionLevel in the generated docs).
+ns.CURRENT_EXPANSION_ID = 11 -- Midnight
+ns.EXPANSIONS = {
+  { id = 0, key = "Classic", label = "Classic" },
+  { id = 1, key = "Tbc", label = "The Burning Crusade" },
+  { id = 2, key = "Wotlk", label = "Wrath of the Lich King" },
+  { id = 3, key = "Cata", label = "Cataclysm" },
+  { id = 4, key = "Mop", label = "Mists of Pandaria" },
+  { id = 5, key = "Wod", label = "Warlords of Draenor" },
+  { id = 6, key = "Legion", label = "Legion" },
+  { id = 7, key = "Bfa", label = "Battle for Azeroth" },
+  { id = 8, key = "Sl", label = "Shadowlands" },
+  { id = 9, key = "Df", label = "Dragonflight" },
+  { id = 10, key = "Tww", label = "The War Within" },
+  { id = 11, key = "Midnight", label = "Midnight" },
+}
 local defaults = {
   autoSell = true,        -- sell junk on every vendor visit
   autoRepair = true,      -- repair on every vendor visit
@@ -86,10 +108,13 @@ local defaults = {
   oldGearIlvlGap = 30,    -- ...when this far below equipped
   oldGearBoE = false,     -- include Bind on Equip in old gear
   oldGearWarbound = false,-- include Warbound in old gear
-  keepCurrentExpansion = true,
   keepDisenchantable = true,
   compareAuction = true,  -- skip vendor sale when auction nets more
 }
+-- Per-expansion checklist: one opt-in boolean per expansion, all off.
+-- (The old Midnight keep toggle is gone; an unchecked Midnight row
+-- keeps current-expansion gear the same way.)
+for _, e in ipairs(ns.EXPANSIONS) do defaults["sell" .. e.key] = false end
 ns.defaults = defaults
 
 VocVendorDB = VocVendorDB or {}
@@ -214,7 +239,9 @@ function ns.collectJunk()
   if ns.opts().junkOldGear then
     oldGear = ns.collectOldGear()
   end
-  return { grayCount = grayCount, oldGear = oldGear }
+  -- The checklist is its own consent: no parent toggle gates it.
+  local expJunk = ns.collectExpansionJunk()
+  return { grayCount = grayCount, oldGear = oldGear, expJunk = expJunk }
 end
 
 -- Deferred sale accounting: every sale in a vendor visit adds its count
@@ -386,19 +413,26 @@ end
 function ns.autoSell()
   local junk = ns.collectJunk()
   local kept = ns.collectKeptDisenchantables()
-  if junk.grayCount == 0 and #junk.oldGear == 0 and #kept == 0 then return end
+  local dead = ns.collectDeadItems()
+  if junk.grayCount == 0 and #junk.oldGear == 0 and #junk.expJunk == 0
+    and #kept == 0 and #dead == 0 then
+    return
+  end
   local earned = 0
   local nGray = 0
   ns.reportKept(kept)
+  ns.reportDead(dead)
   if junk.grayCount > 0 then
     earned = ns.sellGrays()
     nGray = junk.grayCount
   end
   local nOld, oldValue, leftover = ns.sellOldGearItems(junk.oldGear)
+  local nExp, expValue, leftoverExp = ns.sellOldGearItems(junk.expJunk)
+  for _, it in ipairs(leftoverExp) do leftover[#leftover + 1] = it end
   ns.reportLeftover(leftover)
-  if nGray + nOld > 0 then
+  if nGray + nOld + nExp > 0 then
     ns.sellSound()
-    ns.recordSale(nGray + nOld, earned + oldValue)
+    ns.recordSale(nGray + nOld + nExp, earned + oldValue + expValue)
   end
 end
 
@@ -507,7 +541,7 @@ function ns.refreshJunkButton()
     return
   end
   local junk = ns.collectJunk()
-  setEnabled(junk.grayCount > 0 or #junk.oldGear > 0)
+  setEnabled(junk.grayCount > 0 or #junk.oldGear > 0 or #junk.expJunk > 0)
 end
 
 -- Manual path (native button or /vv): same definition as auto-sell, but
@@ -515,30 +549,39 @@ end
 -- Blizzard's original click and popup.
 function ns.onJunkButtonClick(button)
   local kept = ns.collectKeptDisenchantables()
+  local dead = ns.collectDeadItems()
   local junk = ns.collectJunk()
-  if junk.grayCount == 0 and #junk.oldGear == 0 then
+  if junk.grayCount == 0 and #junk.oldGear == 0 and #junk.expJunk == 0 then
     if #kept > 0 then
       ns.reportKept(kept, true)
+    elseif #dead > 0 then
+      ns.reportDead(dead, true)
     else
       ns.say("nothing to sell")
     end
     return
   end
-  if #junk.oldGear == 0 then
+  if #junk.oldGear == 0 and #junk.expJunk == 0 then
     if type(ns.blizzJunkClick) == "function" then
       ns.blizzJunkClick(button)
     end
     return
   end
+  local sale = {}
+  for _, list in ipairs({ junk.oldGear, junk.expJunk }) do
+    for _, it in ipairs(list) do sale[#sale + 1] = it end
+  end
   local total = 0
-  for _, it in ipairs(junk.oldGear) do total = total + (it.price or 0) end
+  for _, it in ipairs(sale) do total = total + (it.price or 0) end
   ns.say("junk to sell (" .. junk.grayCount .. " gray, "
-    .. #junk.oldGear .. " old gear):")
-  for _, g in ipairs(ns.mergeByID(junk.oldGear)) do print(ns.mergedLine(g)) end
+    .. #junk.oldGear .. " old gear, " .. #junk.expJunk .. " expansion):")
+  for _, g in ipairs(ns.mergeByID(sale)) do print(ns.mergedLine(g)) end
   StaticPopup_Show("VOCVENDOR_SELL_JUNK",
-    junk.grayCount + #junk.oldGear, ns.moneyString(total),
-    { grayCount = junk.grayCount, oldGear = junk.oldGear })
+    junk.grayCount + #sale, ns.moneyString(total),
+    { grayCount = junk.grayCount, oldGear = junk.oldGear,
+      expJunk = junk.expJunk })
   ns.reportKept(kept, true)
+  ns.reportDead(dead, true)
 end
 
 -- Confirm handler for the dry-run popup: sells the configured junk.
@@ -552,10 +595,12 @@ function ns.sellJunkNow(data)
     nGray = data.grayCount
   end
   local nOld, oldValue, leftover = ns.sellOldGearItems(data.oldGear)
+  local nExp, expValue, leftoverExp = ns.sellOldGearItems(data.expJunk)
+  for _, it in ipairs(leftoverExp) do leftover[#leftover + 1] = it end
   ns.reportLeftover(leftover)
-  if nGray + nOld > 0 then
+  if nGray + nOld + nExp > 0 then
     ns.sellSound()
-    ns.recordSale(nGray + nOld, earned + oldValue)
+    ns.recordSale(nGray + nOld + nExp, earned + oldValue + expValue)
   end
 end
 
@@ -567,6 +612,19 @@ StaticPopupDialogs["VOCVENDOR_SELL_JUNK"] = {
   timeout = 0,
   whileDead = true,
   hideOnEscape = true,
+}
+
+-- Delete confirm: one dead item per dialog, named by link. The Accept
+-- click is the hardware event the container delete needs.
+StaticPopupDialogs["VOCVENDOR_DELETE_ITEM"] = {
+  text = "Delete %s?",
+  button1 = "Delete",
+  button2 = "Cancel",
+  OnAccept = function(_, data) ns.deleteDeadNow(data) end,
+  timeout = 0,
+  whileDead = true,
+  hideOnEscape = true,
+  showAlert = true,
 }
 
 -- Sell Old Gear: bag gear far below the equipped item level.
@@ -590,15 +648,11 @@ function ns.isWarbound(link)
   return ok and warbound == true
 end
 
--- Current-expansion keep-gate (VocWarbank's rule 3, narrowed to the
--- vendor's job): gear from the expansion you are playing is never
--- junk, no matter how far below the equipped piece it sits. The
--- expansion ID is the item's own data (C_Item.GetItemInfo return 15,
--- verified against Blizzard's generated docs on live and forever);
--- the current ID is a named constant bumped per expansion. Fail
--- closed: an unknown item, or an uncached one, counts as current and
--- keeps. Grays are unaffected: Blizzard's own sale takes them all.
-ns.CURRENT_EXPANSION_ID = 11 -- Midnight (ExpansionLevel Midnight = 11)
+-- Expansion data: the item's own expansion ID (C_Item.GetItemInfo
+-- return 15, verified against Blizzard's generated docs on live and
+-- forever). Fail closed: an unknown item, or an uncached one, is never
+-- expansion junk and never a dead item. Grays are unaffected:
+-- Blizzard's own sale takes them all.
 function ns.expansionID(link)
   if type(C_Item) ~= "table" then return nil end
   if type(C_Item.GetItemInfo) ~= "function" then return nil end
@@ -606,11 +660,101 @@ function ns.expansionID(link)
   if not r[1] then return nil end
   return tonumber(r[16]) -- 15th return, past the pcall flag
 end
-function ns.isCurrentExpansion(link)
-  if not ns.opts().keepCurrentExpansion then return false end
-  local id = ns.expansionID(link)
-  if id == nil then return true end
-  return id >= ns.CURRENT_EXPANSION_ID
+function ns.expansionChecked(id)
+  for _, e in ipairs(ns.EXPANSIONS) do
+    if e.id == id then return ns.opts()["sell" .. e.key] == true end
+  end
+  return false
+end
+
+-- Quest guard: quest-class items and quest-bound items keep unless the
+-- quest is complete (dead quest items may sell, or collect for
+-- confirmed destroy). Fail closed: without data the item keeps.
+function ns.questKeeps(link)
+  if type(C_Item) ~= "table" then return true end
+  if type(C_Item.GetItemInfo) ~= "function" then return true end
+  local r = { pcall(C_Item.GetItemInfo, link) }
+  if not r[1] then return true end
+  local classID, bindType = r[13], r[15] -- 12th and 14th returns
+  if classID ~= 12 and bindType ~= 4 then return false end
+  return not ns.isDeadQuestItem(link)
+end
+
+-- Dead quest items. Ports VocWarbank's detector: the completed-quest
+-- title set is built once per session from C_QuestLog, and each link's
+-- tooltip is parsed for one of those titles. Definitive-false: no
+-- completed set, no tooltip, no match -> alive, keeps.
+ns.questTip = nil
+ns.deadQuestTitles = nil
+ns.deadQuestMemo = {}
+function ns.buildDeadQuestTitles()
+  if type(C_QuestLog) ~= "table" then return end
+  if type(C_QuestLog.GetAllCompletedQuestIDs) ~= "function" then return end
+  if type(C_QuestLog.GetTitleForQuestID) ~= "function" then return end
+  local ok, ids = pcall(C_QuestLog.GetAllCompletedQuestIDs)
+  if not ok or type(ids) ~= "table" then return end
+  local titles = {}
+  for _, id in ipairs(ids) do
+    local okTitle, title = pcall(C_QuestLog.GetTitleForQuestID, id)
+    if okTitle and type(title) == "string" and title ~= "" then
+      titles[title] = true
+    end
+  end
+  ns.deadQuestTitles = titles
+end
+function ns.refreshQuests()
+  ns.deadQuestTitles = nil
+  ns.deadQuestMemo = {}
+end
+function ns.questTitleFromLink(link)
+  if not link then return nil end
+  if ns.deadQuestMemo[link] then return ns.deadQuestMemo[link] end
+  if type(CreateFrame) ~= "function" then return nil end
+  if type(UIParent) ~= "table" then return nil end
+  if not ns.questTip then
+    local ok, tip = pcall(CreateFrame, "GameTooltip", "VocVendorQuestTip",
+      UIParent, "GameTooltipTemplate")
+    if not ok or tip == nil then return nil end
+    ns.questTip = tip
+  end
+  ns.questTip:SetOwner(UIParent, "ANCHOR_NONE")
+  ns.questTip:ClearLines()
+  if not pcall(ns.questTip.SetHyperlink, ns.questTip, link) then return nil end
+  for i = 2, ns.questTip:NumLines() do
+    local line = _G["VocVendorQuestTipTextLeft" .. i]
+    local text = line and line.GetText and line:GetText()
+    if text and text ~= "" and ns.deadQuestTitles[text] then
+      ns.deadQuestMemo[link] = text
+      return text
+    end
+  end
+  return nil
+end
+function ns.isDeadQuestItem(link)
+  if ns.deadQuestTitles == nil then ns.buildDeadQuestTitles() end
+  if ns.deadQuestTitles == nil then return false end
+  return ns.questTitleFromLink(link) ~= nil
+end
+
+-- Artifact-power tokens (Legion and kin): no vendor price, no use once
+-- their expansion is done. C_Item.IsArtifactPowerItem names them
+-- directly. Missing API or failed call lists nothing, never.
+function ns.isArtifactPower(link)
+  if type(C_Item) ~= "table" then return false end
+  if type(C_Item.IsArtifactPowerItem) ~= "function" then return false end
+  local ok, v = pcall(C_Item.IsArtifactPowerItem, link)
+  return ok and v == true
+end
+
+-- True only when the client positively says the vendor takes nothing
+-- from this slot. A missing API or a failed call is not proof, so it
+-- keeps (false) instead of listing for destroy.
+function ns.slotRefused(bag, slot)
+  if type(C_Container) ~= "table" then return false end
+  if type(C_Container.GetContainerItemInfo) ~= "function" then return false end
+  local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+  if not ok or type(info) ~= "table" then return false end
+  return info.hasNoValue == true
 end
 
 -- Enchanter gate: true when the player knows any Disenchant spell.
@@ -767,9 +911,6 @@ function ns.isOldGear(link, gap, ignoreDE, scan)
   local o = ns.opts()
   if bindType == Enum.ItemBind.OnEquip and not o.oldGearBoE then return false end
   if ns.isWarbound(link) and not o.oldGearWarbound then return false end
-  -- Current-expansion gear keeps (BoE follows the BoE toggle above,
-  -- mirroring VocWarbank: priced BoEs sell, non-BoE gear keeps).
-  if bindType ~= Enum.ItemBind.OnEquip and ns.isCurrentExpansion(link) then return false end
   if not ignoreDE and o.keepDisenchantable and ns.isDisenchantable(link) then
     -- canDE is the per-scan hoist; nil resolves live for direct calls.
     local canDE = scan and scan.canDE
@@ -819,14 +960,101 @@ function ns.collectOldGear()
   return out
 end
 
--- Gear kept for disenchanting: items that would be old gear but for the
--- disenchant exclusion. Only non-empty when old gear is junk, the toggle
--- is on, and the player can disenchant; everyone else skips the scan.
+-- Expansion junk: everything the vendor buys from a checked expansion,
+-- whatever the type. The check on the row is the consent, so the ilvl
+-- gap does not apply here; every keep gate does (equipment sets,
+-- transmog/toy/pet, Pawn upgrades, live quest items, heirlooms), and
+-- disenchantables divert to the disenchant list first unless ignoreDE.
+function ns.isExpansionJunk(link, bag, slot, ignoreDE, scan)
+  local id = ns.expansionID(link)
+  if id == nil or not ns.expansionChecked(id) then return false end
+  if ns.inEquipmentSet(bag, slot) then return false end
+  if not ns.slotHasValue(bag, slot) then return false end
+  if ns.isUncollectedCollectible(link, scan and scan.memo) then return false end
+  local _, _, quality, _, _, _, _, _, _, _, sellPrice = C_Item.GetItemInfo(link)
+  if not quality then return false end
+  if quality == Enum.ItemQuality.Heirloom then return false end
+  if not sellPrice or sellPrice == 0 then return false end
+  if ns.questKeeps(link) then return false end
+  if ns.pawnSaysUpgrade(link) then return false end
+  if not ignoreDE and ns.opts().keepDisenchantable and ns.isDisenchantable(link) then
+    local canDE = scan and scan.canDE
+    if canDE == nil then canDE = ns.canDisenchant() end
+    if canDE then return false end
+  end
+  return true
+end
+
+function ns.collectExpansionJunk()
+  local out = {}
+  local scan = { canDE = ns.canDisenchant(), memo = {} }
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      local link = C_Container.GetContainerItemLink(bag, slot)
+      if link and ns.isExpansionJunk(link, bag, slot, nil, scan) then
+        local _, _, _, _, _, _, _, _, _, _, sellPrice = C_Item.GetItemInfo(link)
+        out[#out + 1] = { link = link, bag = bag, slot = slot,
+          price = sellPrice or 0 }
+      end
+    end
+  end
+  return out
+end
+
+-- Dead items: checked-expansion leftovers the vendor refuses, proven
+-- dead: a completed quest's item, or an artifact-power token. One
+-- confirm per item in the delete list; nothing else qualifies, and an
+-- uncached item never does.
+function ns.deadReason(link, bag, slot)
+  local id = ns.expansionID(link)
+  if id == nil or not ns.expansionChecked(id) then return nil end
+  if ns.inEquipmentSet(bag, slot) then return nil end
+  if not ns.slotRefused(bag, slot) then
+    local _, _, _, _, _, _, _, _, _, _, sellPrice = C_Item.GetItemInfo(link)
+    if sellPrice and sellPrice > 0 then return nil end
+  end
+  local _, _, quality = C_Item.GetItemInfo(link)
+  if not quality then return nil end
+  if ns.isUncollectedCollectible(link) then return nil end
+  if ns.isDeadQuestItem(link) then return "quest complete" end
+  if ns.isArtifactPower(link) then return "artifact power" end
+  return nil
+end
+
+function ns.collectDeadItems()
+  local out = {}
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      local link = C_Container.GetContainerItemLink(bag, slot)
+      if link then
+        local reason = ns.deadReason(link, bag, slot)
+        if reason then
+          out[#out + 1] = { link = link, bag = bag, slot = slot,
+            reason = reason }
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- Gear kept for disenchanting: items that would sell but for the
+-- disenchant exclusion, from the old-gear gap or a checked expansion.
+-- Only non-empty when the toggle is on, the player can disenchant, and
+-- something is actually for sale; everyone else skips the scan.
+function ns.anyExpansionChecked()
+  for _, e in ipairs(ns.EXPANSIONS) do
+    if ns.opts()["sell" .. e.key] == true then return true end
+  end
+  return false
+end
 function ns.collectKeptDisenchantables()
   local o = ns.opts()
-  if not o.junkOldGear then return {} end
   if not o.keepDisenchantable then return {} end
   if not ns.canDisenchant() then return {} end
+  if not o.junkOldGear and not ns.anyExpansionChecked() then return {} end
   local gap = o.oldGearIlvlGap or 30
   local out = {}
   local scan = { canDE = true, memo = {} }
@@ -835,8 +1063,9 @@ function ns.collectKeptDisenchantables()
     for slot = 1, slots do
       local link = C_Container.GetContainerItemLink(bag, slot)
       if link and not ns.inEquipmentSet(bag, slot)
-        and ns.isOldGear(link, gap, true, scan)
-        and ns.isDisenchantable(link) then
+        and ns.isDisenchantable(link)
+        and ((o.junkOldGear and ns.isOldGear(link, gap, true, scan))
+          or ns.isExpansionJunk(link, bag, slot, true, scan)) then
         out[#out + 1] = { link = link, bag = bag, slot = slot }
       end
     end
@@ -1086,6 +1315,169 @@ function ns.reportKept(kept, chatAlways)
   end
 end
 
+-- Delete list. Dead items the vendor refuses are actionable, like kept
+-- gear: one row per item, and clicking a row asks once, then deletes
+-- that bag slot. The confirm dialog owns the protected calls
+-- (PickupContainerItem + DeleteCursorItem need the click's hardware
+-- event, like every container move): the row only names the item.
+-- Deletions are always announced; a failed delete reports instead of
+-- retrying, like a failed sale.
+ns.deadWindow = nil
+ns.deadRows = {}
+
+function ns.ensureDeadWindow()
+  if ns.deadWindow then return ns.deadWindow end
+  if type(CreateFrame) ~= "function" then return nil end
+  if type(UIParent) ~= "table" then return nil end
+  local ok, window = pcall(CreateFrame, "Frame", "VocVendorDeadWindow",
+    UIParent, "BasicFrameTemplateWithInset")
+  if not ok or window == nil then return nil end
+  window:SetSize(280, 120)
+  window:SetPoint("CENTER")
+  window:SetMovable(true)
+  window:EnableMouse(true)
+  window:RegisterForDrag("LeftButton")
+  window:SetScript("OnDragStart", window.StartMoving)
+  window:SetScript("OnDragStop", window.StopMovingOrSizing)
+  if window.TitleText then window.TitleText:SetText("Delete") end
+  if not window.CloseButton then
+    local closeBtn = CreateFrame("Button", nil, window, "UIPanelCloseButton")
+    if closeBtn then
+      closeBtn:SetPoint("TOPRIGHT", window, "TOPRIGHT", -4, -4)
+      closeBtn:SetScript("OnClick", function() window:Hide() end)
+    end
+  end
+  local hint = window:CreateFontString(nil, "ARTWORK", "GameFontDisable")
+  hint:SetPoint("TOPLEFT", window, "TOPLEFT", 16, -30)
+  hint:SetText("Dead items the vendor won't buy. Click to delete (confirms first)")
+  if type(UISpecialFrames) == "table" then
+    table.insert(UISpecialFrames, "VocVendorDeadWindow")
+  end
+  window:Hide()
+  window:SetScript("OnHide", function() ns.play("close") end)
+  ns.deadWindow = window
+  return window
+end
+
+-- One row: the item's icon, link, and why it is dead. Plain buttons:
+-- the dialog behind the click does the protected work.
+local function newDeadRow(window)
+  local ok, row = pcall(CreateFrame, "Button", nil, window)
+  if not ok or row == nil then return nil end
+  row:SetSize(248, 22)
+  row.icon = row:CreateTexture(nil, "ARTWORK")
+  row.icon:SetSize(18, 18)
+  row.icon:SetPoint("LEFT", row, "LEFT", 2, 0)
+  row.text = row:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+  row.text:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
+  row:SetScript("OnClick", function(self)
+    if type(InCombatLockdown) == "function" and InCombatLockdown() then
+      ns.say("can't delete during combat")
+      return
+    end
+    StaticPopup_Show("VOCVENDOR_DELETE_ITEM", self.deLink, nil,
+      { link = self.deLink })
+  end)
+  if type(row.HookScript) == "function" then
+    row:HookScript("OnClick", function(_, _, down)
+      if not down then ns.play("on") end
+    end)
+  end
+  return row
+end
+
+function ns.refreshDeadWindow(dead)
+  local locked = type(InCombatLockdown) == "function" and InCombatLockdown()
+  if dead == nil then
+    if not ns.deadWindow or not ns.deadWindow:IsShown() then return 0 end
+    if locked then return #ns.deadRows end
+    dead = ns.collectDeadItems()
+  elseif locked then
+    return nil
+  end
+  if #dead == 0 then
+    if ns.deadWindow and ns.deadWindow:IsShown() then ns.deadWindow:Hide() end
+    return 0
+  end
+  local window = ns.ensureDeadWindow()
+  if not window then return nil end
+  for i = #ns.deadRows + 1, #dead do
+    local row = newDeadRow(window)
+    if not row then return nil end
+    ns.deadRows[#ns.deadRows + 1] = row
+  end
+  for i, row in ipairs(ns.deadRows) do
+    local it = dead[i]
+    if it then
+      row.deLink = it.link
+      row.text:SetText(it.link .. " (" .. it.reason .. ")")
+      local _, _, _, _, _, _, _, _, _, texture = C_Item.GetItemInfo(it.link)
+      if texture then
+        row.icon:SetTexture(texture)
+        row.icon:Show()
+      else
+        row.icon:Hide()
+      end
+      row:ClearAllPoints()
+      row:SetPoint("TOPLEFT", window, "TOPLEFT", 16, -(52 + (i - 1) * 24))
+      row:Show()
+    else
+      row:Hide()
+    end
+  end
+  window:SetSize(280, 64 + #dead * 24)
+  if not window:IsShown() then
+    window:Show()
+    ns.play("open")
+  end
+  return #dead
+end
+
+function ns.deleteDeadNow(data)
+  local link = data and data.link
+  if not link then return end
+  if type(C_Container) ~= "table" then return end
+  if type(C_Container.PickupContainerItem) ~= "function" then
+    ns.say("can't delete here")
+    return
+  end
+  if type(DeleteCursorItem) ~= "function" then
+    ns.say("can't delete here")
+    return
+  end
+  if type(InCombatLockdown) == "function" and InCombatLockdown() then
+    ns.say("can't delete during combat")
+    return
+  end
+  local bag, slot = ns.findKeptSlot(link)
+  if bag == nil then return end
+  local okPick = pcall(C_Container.PickupContainerItem, bag, slot)
+  local okDel = okPick and pcall(DeleteCursorItem)
+  local gone = false
+  if okDel then
+    local okLink, now = pcall(C_Container.GetContainerItemLink, bag, slot)
+    gone = okLink and now ~= link
+  end
+  if gone then
+    ns.play("sell")
+    ns.say("deleted " .. link)
+  else
+    -- A picked-up item left on the cursor goes back to its slot.
+    pcall(C_Container.PickupContainerItem, bag, slot)
+    ns.say("couldn't delete " .. link)
+  end
+end
+
+function ns.reportDead(dead, chatAlways)
+  if not dead or #dead == 0 then return end
+  if ns.refreshDeadWindow(dead) then return end
+  if chatAlways or ns.opts().announce then
+    local what = #dead == 1 and "1 item" or #dead .. " items"
+    ns.say("dead items the vendor won't buy (" .. what .. "):")
+    for _, it in ipairs(dead) do print("  " .. tostring(it.link)) end
+  end
+end
+
 -- Settings
 ns.settingsBuilt = false
 function ns.ensureSettings()
@@ -1132,8 +1524,12 @@ function ns.ensureSettings()
     "Skip vendor sale when auction data says the auction house or disenchanting nets more. Needs Auctionator, TradeSkillMaster, or Oribos Exchange.")
   check("keepDisenchantable", "Keep disenchantable gear",
     "Enchanters only: keep gear you could disenchant out of junk sales. Off sells it with junk like any other old gear.")
-  check("keepCurrentExpansion", "Keep current-expansion gear",
-    "Never count gear from the current expansion as old gear, even far below your equipped pieces. Off sells it like any other old gear.")
+  for _, e in ipairs(ns.EXPANSIONS) do
+    local label = "Vendor " .. e.label .. " items"
+    if e.id == ns.CURRENT_EXPANSION_ID then label = label .. " (current)" end
+    check("sell" .. e.key, label,
+      "Sell everything the vendor buys from " .. e.label .. " when checked. Dead leftovers the vendor refuses collect for confirmed delete instead.")
+  end
   ns.settingsBuilt = true
   ns.settingsCategory = category
 end
@@ -1152,6 +1548,8 @@ end
 function VocVendor_CompartmentClick()
   local kept = ns.collectKeptDisenchantables()
   if #kept > 0 and ns.refreshDEWindow(kept) then return end
+  local dead = ns.collectDeadItems()
+  if #dead > 0 and ns.refreshDeadWindow(dead) then return end
   ns.openConfig()
 end
 
@@ -1212,6 +1610,7 @@ ns.HELP = {
   "/vv on|off     auto-sell junk on vendor visits",
   "/vv repair     repair now",
   "/vv disenchant open the disenchant list",
+  "/vv destroy    delete dead expansion items (confirms each)",
   "/vv config     open Settings > AddOns > VocVendor",
   "/vv help       this list (/vocvendor works too)",
 }
@@ -1250,6 +1649,13 @@ SlashCmdList.VOCVENDOR = function(msg)
     else
       ns.reportKept(kept, true)
     end
+  elseif msg == "destroy" then
+    local dead = ns.collectDeadItems()
+    if #dead == 0 then
+      ns.say("nothing to delete")
+    else
+      ns.reportDead(dead, true)
+    end
   elseif msg == "config" then
     ns.openConfig()
   else
@@ -1265,6 +1671,7 @@ ns.frame:RegisterEvent("PLAYER_LOGIN")
 ns.frame:RegisterEvent("MERCHANT_SHOW")
 ns.frame:RegisterEvent("MERCHANT_CLOSED")
 ns.frame:RegisterEvent("BAG_UPDATE")
+ns.frame:RegisterEvent("QUEST_TURNED_IN")
 ns.frame:SetScript("OnEvent", function(_, event, arg1)
   if event == "ADDON_LOADED" and arg1 == name then
     -- The client replaces the SavedVariables global with the loaded
@@ -1284,5 +1691,8 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1)
     ns.onMerchantClosed()
   elseif event == "BAG_UPDATE" then
     ns.refreshDEWindow() -- the disenchant list tracks the bags live
+    ns.refreshDeadWindow() -- and so does the delete list
+  elseif event == "QUEST_TURNED_IN" then
+    ns.refreshQuests() -- a new completion changes what counts as dead
   end
 end)

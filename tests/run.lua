@@ -56,6 +56,9 @@ local function loadAddon(world)
       if world.noContainerInfo then return nil end
       return { hasNoValue = world.noValues[bag .. ":" .. slot] == true }
     end,
+    PickupContainerItem = function(bag, slot)
+      world.cursor = { bag = bag, slot = slot }
+    end,
   }
   g.C_Item = {
     GetItemInfoInstant = function(link)
@@ -76,6 +79,8 @@ local function loadAddon(world)
     -- (Blizzard takes the numeric ID here, like its own callers do.)
     IsCosmeticItem = function(itemID) return world.cosmetic[itemID] == true end,
     GetItemLearnTransmogSet = function(itemID) return world.transmogSet[itemID] end,
+    -- world.artifactPower[link] marks an artifact-power token.
+    IsArtifactPowerItem = function(item) return world.artifactPower[item] == true end,
   }
   g.C_TransmogCollection = {
     -- world.noTransmog[link] marks an appearance the player lacks.
@@ -89,6 +94,21 @@ local function loadAddon(world)
   }
   -- world.ownedToys[itemID] marks a toy the player owns.
   g.PlayerHasToy = function(itemID) return world.ownedToys[itemID] == true end
+  -- world.completedQuestIDs lists completed quest IDs; world.questTitles
+  -- maps them to titles for the dead-quest tooltip match.
+  g.C_QuestLog = {
+    GetAllCompletedQuestIDs = function() return world.completedQuestIDs end,
+    GetTitleForQuestID = function(id) return world.questTitles[id] end,
+  }
+  g.DeleteCursorItem = function()
+    if world.deleteErrors then error("delete failed") end
+    if world.cursor then
+      world.removed[world.cursor.bag .. ":" .. world.cursor.slot] = true
+      world.cursor = nil
+      return true
+    end
+    return false
+  end
   g.C_PetJournal = {
     -- world.petSpecies[itemID] = speciesID marks a pet item; the 13th
     -- return is the species, matching Blizzard's signature.
@@ -158,6 +178,16 @@ local function loadAddon(world)
     f.RegisterEvent = function(_, e) f.events[e] = true end
     f.SetScript = function(_, n, fn) f.scripts[n] = fn end
     f.GetScript = function(_, n) return f.scripts[n] end
+    -- Quest-tip frames (GameTooltipTemplate): the dead-quest detector
+    -- reads item tooltips through these. world.tipLines[link] is the
+    -- list of left-side text lines for that link.
+    if type(template) == "string"
+      and template:find("GameTooltipTemplate", 1, true) then
+      f.SetOwner = function() end
+      f.ClearLines = function() end
+      f.SetHyperlink = function(_, link) world.tipLink = link end
+      f.NumLines = function() return #(world.tipLines[world.tipLink] or {}) end
+    end
     f.HookScript = function(_, n, fn)
       local prev = f.scripts[n]
       f.scripts[n] = function(...)
@@ -234,6 +264,13 @@ local function loadAddon(world)
     Hide = function() world.gametip.shown = false end,
     SetHyperlink = function(_, link) world.gametip.link = link end,
   }
+  -- Tooltip text lines for the VocVendorQuestTip frame the dead-quest
+  -- detector creates.
+  for i = 1, 8 do
+    g["VocVendorQuestTipTextLeft" .. i] = {
+      GetText = function() return (world.tipLines[world.tipLink] or {})[i] end,
+    }
+  end
   g.StaticPopupDialogs = {}
   g.StaticPopup_Show = function(which, a, b, data)
     world.popups[#world.popups + 1] = { which = which, a = a, b = b, data = data }
@@ -303,6 +340,8 @@ local function newWorld()
     removed = {}, stuck = {}, sellErrors = {},
     cosmetic = {}, transmogSet = {}, noTransmog = {},
     toyInfo = {}, ownedToys = {}, petSpecies = {}, petOwned = {},
+    artifactPower = {}, completedQuestIDs = {}, questTitles = {},
+    tipLines = {}, tipLink = nil, cursor = nil,
     loadedAddons = {},
     combat = false, deSpellName = "Disenchant", noSecure = false,
   }
@@ -355,7 +394,8 @@ do
   check("default gap", o.oldGearIlvlGap == 30)
   check("default BoE excluded", o.oldGearBoE == false)
   check("default Warbound excluded", o.oldGearWarbound == false)
-  check("default keep current expansion", o.keepCurrentExpansion == true)
+  check("no expansion pre-checked",
+    o.sellLegion == false and o.sellClassic == false and o.sellMidnight == false)
   check("default keep disenchantable", o.keepDisenchantable == true)
   check("default compareAuction", o.compareAuction == true)
 end
@@ -716,7 +756,7 @@ do
   w.frame.onEvent(nil, "MERCHANT_SHOW") -- installs the button hook
   w.hookedClick.OnClick(w.env.MerchantSellAllJunkButton)
   check("dry-run header",
-    w.printed[1] == "|cff66ccffVocVendor|r: junk to sell (3 gray, 2 old gear):")
+    w.printed[1] == "|cff66ccffVocVendor|r: junk to sell (3 gray, 2 old gear, 0 expansion):")
   check("dry-run merges by item",
     w.printed[2] == "  " .. old1 .. " for 12s 0c"
     and w.printed[3] == "  " .. old2 .. " for 8s 0c")
@@ -724,7 +764,8 @@ do
   check("popup count", w.popups[1].a == 5)
   check("popup total", w.popups[1].b == "20s 0c")
   check("popup carries data",
-    w.popups[1].data.grayCount == 3 and #w.popups[1].data.oldGear == 2)
+    w.popups[1].data.grayCount == 3 and #w.popups[1].data.oldGear == 2
+    and #w.popups[1].data.expJunk == 0)
   check("blizzard click skipped", w.blizzClicked == false)
 end
 
@@ -821,6 +862,8 @@ do
   w.env.SlashCmdList.VOCVENDOR("onn") -- typo: help, never a toggle
   check("unknown subcommand prints help", #w.printed == before + 1 + #ns.HELP)
   check("unknown subcommand never toggles", ns.opts().autoSell == true)
+  check("help lists destroy",
+    table.concat(ns.HELP, "\n"):find("/vv destroy", 1, true) ~= nil)
   check("short and long slash registered",
     w.env.SLASH_VOCVENDOR1 == "/vv" and w.env.SLASH_VOCVENDOR2 == "/vocvendor")
   w.repairCost = 100
@@ -838,9 +881,11 @@ do
   check("autoSell setting", w.env.Settings and w.settingsReg["VocVendor_autoSell"] ~= nil)
   check("gap slider", w.settingsSliders == 1)
   check("gap default", w.settingsReg["VocVendor_oldGearIlvlGap"].default == 30)
-  check("checkboxes", w.settingsChecks == 10)
-  check("current-expansion setting", w.settingsReg["VocVendor_keepCurrentExpansion"] ~= nil)
-  check("current-expansion default", w.settingsReg["VocVendor_keepCurrentExpansion"].default == true)
+  check("checkboxes", w.settingsChecks == 21)
+  check("legion setting", w.settingsReg["VocVendor_sellLegion"] ~= nil)
+  check("legion default off", w.settingsReg["VocVendor_sellLegion"].default == false)
+  check("midnight current label",
+    w.settingsReg["VocVendor_sellMidnight"].label:find("%(current%)") ~= nil)
   check("keep disenchantable setting", w.settingsReg["VocVendor_keepDisenchantable"] ~= nil)
   check("keep default", w.settingsReg["VocVendor_keepDisenchantable"].default == true)
   check("compare setting", w.settingsReg["VocVendor_compareAuction"] ~= nil)
@@ -1137,7 +1182,7 @@ do
   w.frame.onEvent(nil, "MERCHANT_SHOW") -- installs the button hook
   w.hookedClick.OnClick(w.env.MerchantSellAllJunkButton)
   check("dry-run sells only the common",
-    w.printed[1] == "|cff66ccffVocVendor|r: junk to sell (0 gray, 1 old gear):")
+    w.printed[1] == "|cff66ccffVocVendor|r: junk to sell (0 gray, 1 old gear, 0 expansion):")
   check("dry-run merges the common", w.printed[2] == "  " .. commonOld .. " for 12s 0c")
   check("dry-run opens the disenchant window", ns.deWindow ~= nil and ns.deWindow:IsShown())
   check("window lists only the kept epic", #ns.deRows == 1)
@@ -1686,28 +1731,213 @@ do
     #ns.keptAuctionHints({ { link = "item:keephint" } }) == 0)
 end
 
--- 66. Current-expansion gear is never old gear, even far below the
--- equipped piece. Older expansions sell like before; unknown keeps.
+-- 66. Expansion checklist: checked expansions sell across types, the
+-- ilvl gap does not apply; unchecked expansions keep like before.
 do
   local w = newWorld()
   local ns = loadAddon(w)
   clientLoaded(w)
-  ns.opts().junkOldGear = true
+  ns.opts().sellLegion = true
   w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
-  local current = gear(w, { slot = "INVTYPE_HEAD", level = 300, expansion = 11 })
-  local older = gear(w, { slot = "INVTYPE_HEAD", level = 300, expansion = 10 })
-  local unknown = gear(w, { slot = "INVTYPE_HEAD", level = 300 })
+  local legionGear = gear(w, { slot = "INVTYPE_HEAD", level = 395,
+    rarity = 1, expansion = 6 })
+  local legionMat = gear(w, { classID = 7, expansion = 6, price = 50 })
+  local classicMat = gear(w, { classID = 7, expansion = 0, price = 50 })
+  local unknown = gear(w, { classID = 7, expansion = 6, price = 50 })
   w.expansions[unknown] = nil
-  check("current expansion kept", ns.isOldGear(current, 30) == false)
-  check("older expansion sells", ns.isOldGear(older, 30) == true)
-  check("unknown expansion keeps", ns.isOldGear(unknown, 30) == false)
-  check("expansion helper reads the ID", ns.expansionID(current) == 11)
+  local b1, s1 = putBag(w, legionGear)
+  local b2, s2 = putBag(w, legionMat)
+  putBag(w, classicMat)
+  putBag(w, unknown)
+  check("legion checked", ns.expansionChecked(6) == true)
+  check("classic unchecked", ns.expansionChecked(0) == false)
+  check("unknown id unchecked", ns.expansionChecked(99) == false)
+  check("expansion helper reads the ID", ns.expansionID(legionGear) == 6)
   check("expansion helper nil when unknown", ns.expansionID(unknown) == nil)
-  check("current helper true", ns.isCurrentExpansion(current) == true)
-  check("current helper false for older", ns.isCurrentExpansion(older) == false)
-  ns.opts().keepCurrentExpansion = false
-  check("opt-out sells current too", ns.isOldGear(current, 30) == true)
-  check("helper off", ns.isCurrentExpansion(current) == false)
+  check("gap bypassed for checked gear",
+    ns.isExpansionJunk(legionGear, b1, s1) == true)
+  check("trade good sells", ns.isExpansionJunk(legionMat, b2, s2) == true)
+  check("unchecked keeps", ns.isExpansionJunk(classicMat, 0, 3) == false)
+  check("unknown keeps", ns.isExpansionJunk(unknown, 0, 4) == false)
+  local junk = ns.collectJunk()
+  check("checklist collected", #junk.expJunk == 2)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("checklist sold", #w.sold == 2)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("combined line",
+    w.printed[1] == "|cff66ccffVocVendor|r: sold 2 items for 10s 50c")
+end
+
+-- 67. Keep gates hold for checked expansions: transmog, equipment sets,
+-- Pawn upgrades, and live quest items never sell.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().sellLegion = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local app = gear(w, { level = 100, expansion = 6, price = 500 })
+  w.cosmetic[w.itemIDs[app]] = true
+  w.noTransmog[app] = true
+  local ab, as = putBag(w, app)
+  check("uncollected appearance keeps",
+    ns.isExpansionJunk(app, ab, as) == false)
+  w.noTransmog[app] = nil
+  check("collected appearance sells",
+    ns.isExpansionJunk(app, ab, as) == true)
+  local live = gear(w, { classID = 12, expansion = 6, price = 300 })
+  w.tipLines[live] = { live, "A Quest Still Open" }
+  local lb, ls = putBag(w, live)
+  check("live quest item keeps",
+    ns.isExpansionJunk(live, lb, ls) == false)
+end
+
+-- 67b. Equipment sets and Pawn upgrades keep, even checked.
+do
+  local w = newWorld()
+  w.withPawn = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().sellLegion = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local setGear = gear(w, { level = 100, expansion = 6, price = 500 })
+  local sb, ss = putBag(w, setGear)
+  w.equipSets[sb .. ":" .. ss] = true
+  check("set gear keeps", ns.isExpansionJunk(setGear, sb, ss) == false)
+  local flagged = gear(w, { level = 100, expansion = 6, price = 500 })
+  w.pawnUpgrades[flagged] = true
+  local fb, fs = putBag(w, flagged)
+  check("Pawn upgrade keeps",
+    ns.isExpansionJunk(flagged, fb, fs) == false)
+end
+
+-- 68. Dead quest items: with a price they sell; without one they list
+-- for confirmed delete. Live quest items keep. Turn-ins reset the set.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().sellLegion = true
+  w.completedQuestIDs = { 44 }
+  w.questTitles = { [44] = "The Dead Quest" }
+  local priced = gear(w, { classID = 12, expansion = 6, price = 300 })
+  w.tipLines[priced] = { priced, "The Dead Quest" }
+  local free = gear(w, { classID = 12, expansion = 6, price = 0 })
+  w.tipLines[free] = { free, "The Dead Quest" }
+  local pb, ps = putBag(w, priced)
+  local fb, fs = putBag(w, free)
+  check("priced dead quest sells",
+    ns.isExpansionJunk(priced, pb, ps) == true)
+  check("dead quest detected", ns.isDeadQuestItem(free) == true)
+  check("free dead quest not junk",
+    ns.isExpansionJunk(free, fb, fs) == false)
+  local dead = ns.collectDeadItems()
+  check("free dead quest listed",
+    #dead == 1 and dead[1].link == free
+    and dead[1].reason == "quest complete")
+  check("priced dead quest not listed",
+    (function() for _, it in ipairs(dead) do
+      if it.link == priced then return false end end
+      return true end)())
+  w.frame.onEvent(nil, "QUEST_TURNED_IN")
+  check("turn-in clears the quest cache", ns.deadQuestTitles == nil)
+end
+
+-- 69. Artifact-power tokens list for delete; the row click confirms,
+-- the accept deletes, failures report. Combat disarms the click.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().sellLegion = true
+  w.repairCan = false
+  local ap = gear(w, { classID = 0, expansion = 6, price = 0 })
+  w.artifactPower[ap] = true
+  local ab, as = putBag(w, ap)
+  check("ap token not junk", ns.isExpansionJunk(ap, ab, as) == false)
+  local dead = ns.collectDeadItems()
+  check("ap token listed",
+    #dead == 1 and dead[1].reason == "artifact power")
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("delete list opened", ns.deadWindow:IsShown())
+  check("one row for one dead item", #ns.deadRows == 1)
+  ns.deadRows[1].scripts.OnClick(ns.deadRows[1])
+  check("row click asks", #w.popups == 1
+    and w.popups[1].which == "VOCVENDOR_DELETE_ITEM"
+    and w.popups[1].data.link == ap)
+  w.env.StaticPopupDialogs.VOCVENDOR_DELETE_ITEM.OnAccept(nil,
+    w.popups[1].data)
+  check("accept deletes the slot", w.removed[ab .. ":" .. as] == true)
+  check("cursor cleared", w.cursor == nil)
+  check("deletion announced",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: deleted " .. ap)
+end
+
+-- 69b. Failed delete reports and puts the item back; combat disarms.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().sellLegion = true
+  w.deleteErrors = true
+  local ap = gear(w, { classID = 0, expansion = 6, price = 0 })
+  w.artifactPower[ap] = true
+  putBag(w, ap)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  ns.deadRows[1].scripts.OnClick(ns.deadRows[1])
+  w.env.StaticPopupDialogs.VOCVENDOR_DELETE_ITEM.OnAccept(nil,
+    w.popups[1].data)
+  check("failed delete reports",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: couldn't delete " .. ap)
+  w.deleteErrors = false
+  w.combat = true
+  w.popups = {}
+  ns.deadRows[1].scripts.OnClick(ns.deadRows[1])
+  check("combat click asks nothing", #w.popups == 0)
+  check("combat click says so",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: can't delete during combat")
+end
+
+-- 70. Slash and compartment open the delete list; chat covers a
+-- windowless client.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().sellLegion = true
+  local ap = gear(w, { classID = 0, expansion = 6, price = 0 })
+  w.artifactPower[ap] = true
+  putBag(w, ap)
+  w.env.SlashCmdList.VOCVENDOR("destroy")
+  check("slash opens the delete list", ns.deadWindow:IsShown())
+  w.bags[0] = {}
+  if ns.deadWindow:IsShown() then ns.deadWindow:Hide() end
+  w.playedSounds = {}
+  w.env.SlashCmdList.VOCVENDOR("destroy")
+  check("empty destroy answers",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: nothing to delete")
+  putBag(w, ap)
+  local opened = nil
+  w.env.Settings.OpenToCategory = function(id) opened = id end
+  w.env.VocVendor_CompartmentClick("VocVendor", "LeftButton")
+  check("compartment opens the delete list", ns.deadWindow:IsShown())
+  check("compartment skips settings when dead items wait", opened == nil)
+end
+
+-- 70b. Without a window the dead report falls back to chat.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().sellLegion = true
+  local ap = gear(w, { classID = 0, expansion = 6, price = 0 })
+  w.artifactPower[ap] = true
+  putBag(w, ap)
+  w.env.UIParent = nil -- windowless client: no window can open
+  w.env.SlashCmdList.VOCVENDOR("destroy")
+  check("chat names the dead pile",
+    w.printed[1] == "|cff66ccffVocVendor|r: dead items the vendor won't buy (1 item):")
+  check("chat lists the link", w.printed[2] == "  " .. ap)
 end
 
 print("ok - " .. passed .. " checks passed")

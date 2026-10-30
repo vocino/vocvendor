@@ -27,6 +27,8 @@ read_globals = {
   "_G",
   "C_Container", "C_Item", "C_MerchantFrame", "C_Spell", "C_SpellBook",
   "C_AddOns", "C_ToyBox", "C_PetJournal", "C_TransmogCollection",
+  "C_QuestLog", -- dead-quest title set (verified in QuestLogDocumentation)
+  "DeleteCursorItem", -- bare C global, HasRestrictions: confirm click only
   "PlayerHasToy", -- bare C global; Blizzard still calls it bare on both clients
   "CreateFrame", "GetInventoryItemLink", "GetMoney",
   "InCombatLockdown", "IsMouseButtonDown", "UIParent", "UISpecialFrames",

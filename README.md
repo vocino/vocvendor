@@ -30,6 +30,7 @@ while kept gear waits.
 /vv on|off     auto-sell junk on vendor visits
 /vv repair     repair now
 /vv disenchant open the disenchant list
+/vv destroy    delete dead expansion items (confirms each)
 /vv config     open Settings > AddOns > VocVendor
 /vv help       this list (/vocvendor works too)
 ```
@@ -48,7 +49,7 @@ Settings > AddOns > VocVendor, or `/vv config`:
 - Also sell Warbound (default off: alts can use it through the warbank)
 - Compare auction prices (default on: with Auctionator, TradeSkillMaster, or Oribos Exchange installed, gear worth more on the auction house is held back with its reason instead of sold)
 - Keep disenchantable gear (default on: enchanters disenchant it from the list instead of selling it)
-- Keep current-expansion gear (default on: gear from the current expansion never counts as old gear)
+- Vendor <expansion> items (default off, all twelve from Classic to Midnight): check an expansion to sell everything the vendor buys from it, whatever the type. All keep gates still hold; dead leftovers the vendor refuses collect for confirmed delete instead
 
 Every change applies at once.
 
@@ -60,7 +61,12 @@ configured gap below everything you wear in that slot, never
 heirlooms, never anything in a saved equipment set, never anything
 Pawn flags as an upgrade when Pawn is
 installed, never BoE or Warbound unless you opt them in, and never an
-uncollected transmog appearance, toy, or pet, and never gear from the current expansion while its keep is on. Each
+uncollected transmog appearance, toy, or pet. Check an expansion and
+the gap no longer applies to it: every vendorable item from a checked
+expansion sells, whatever the type, with the same gates holding
+(equipment sets, transmog and toys and pets, Pawn upgrades, live quest
+items, heirlooms, auction value). Disenchantables still divert to the
+disenchant list first for enchanters. Each
 candidate is re-checked by bag slot right before it sells, so a bag
 that shifted between the dry run and the click never sells the wrong
 item. When Auctionator, TradeSkillMaster, or Oribos Exchange is installed, old gear worth more on the auction house (sold directly, or disenchanted first, net of the 5% auction cut) is held back with its reason instead of sold. A sale that fails stops the run and lists what is left with the
@@ -71,7 +77,7 @@ Repairs mirror the merchant frame's own buttons: guild bank
 first when allowed, your gold otherwise, and only when you can pay.
 Gear kept for disenchanting (uncommon, rare, or epic, for enchanters) opens a
 click-to-disenchant window instead: one row per item, each click
-disenchants that bag slot, and the list tracks the bags until empty. Moving items between bank and bags stays in VocWarbank (/vw Empty and Deposit); this addon only sells at the vendor.
+disenchants that bag slot, and the list tracks the bags until empty. Dead items from checked expansions that the vendor refuses (completed-quest leftovers, artifact-power tokens) open a click-to-delete list instead: one row per item, each click asks once and then deletes that bag slot, and deletions are always announced. Moving items between bank and bags stays in VocWarbank (/vw Empty and Deposit); this addon only clears bags; moving between bank and bags stays in VocWarbank (/vw Empty and Deposit).
 
 ## What's inside
 
