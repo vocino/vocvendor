@@ -22,22 +22,28 @@ globals = {
   "VocVendor_CompartmentClick", "VocVendor_CompartmentEnter", "VocVendor_CompartmentLeave",
 }
 
--- WoW API and UI globals read by the addon.
+-- WoW API and UI globals read by the addon. Verified on live +
+-- forever (see .reference/api-verification.md); every remaining read
+-- is presence-gated and fails closed.
 read_globals = {
   "_G",
-  "C_Container", "C_Item", "C_MerchantFrame", "C_Spell", "C_SpellBook",
-  "C_AddOns", "C_ToyBox", "C_PetJournal", "C_TransmogCollection",
-  "C_QuestLog", -- dead-quest title set (verified in QuestLogDocumentation)
+  "C_Container", "C_Item", "C_MerchantFrame", "C_Spell", "C_SpellBook", -- bags, prices, junk sale, disenchant gate (live + forever)
+  "C_AddOns", -- rival detection via IsAddOnLoaded (live + forever)
+  "C_ToyBox", "C_PetJournal", "C_TransmogCollection", -- collection keep gates (UI-source ok/ok; calls presence-gated)
+  "C_QuestLog", -- dead-quest title set (QuestLogDocumentation, live + forever)
   "DeleteCursorItem", -- bare C global, HasRestrictions: confirm click only
   "PlayerHasToy", -- bare C global; Blizzard still calls it bare on both clients
   "CreateFrame", "GetInventoryItemLink", "GetMoney",
-  "InCombatLockdown", "IsMouseButtonDown", "UIParent", "UISpecialFrames",
-  "MerchantFrame", "MerchantSellAllJunkButton", "NUM_BAG_SLOTS",
+  "InCombatLockdown", -- combat guards on every click path (live + forever)
+  "IsMouseButtonDown", "UIParent", "UISpecialFrames",
+  "MerchantFrame", "MerchantSellAllJunkButton", -- native Sell Junk hook (MerchantFrame.xml, live + forever)
+  "NUM_BAG_SLOTS", -- bag 0 plus worn bags, presence-gated
   "CanGuildBankRepair", "CanMerchantRepair", "GetRepairAllCost",
-  "RepairAllItems",
-  "Settings", "MinimalSliderWithSteppersMixin",
+  "RepairAllItems", -- mirror of the merchant repair buttons (live + forever)
+  "Settings", -- native panel, retried at PLAYER_LOGIN (live + forever)
+  "MinimalSliderWithSteppersMixin", -- slider label formatter, presence-gated
   "StaticPopup_Show",
-  "Enum",
+  "Enum", -- ItemClass/ItemBind/ItemQuality values identical on both clients
   "PlaySound", "SOUNDKIT", -- presence-gated; ns.play falls back to numeric IDs
   "GameTooltip",
   "hooksecurefunc", "strtrim",
