@@ -33,6 +33,7 @@ while kept gear waits.
 /vv destroy    delete dead expansion items (confirms each)
 /vv consume    sell losing consumables
 /vv protect    keep an item out of every sale
+/vv diag       show consumable ranks
 /vv config     open Settings > AddOns > VocVendor
 /vv help       this list (/vocvendor works too)
 ```
@@ -78,7 +79,7 @@ disenchant list first for enchanters. Each
 candidate is re-checked by bag slot right before it sells, so a bag
 that shifted between the dry run and the click never sells the wrong
 item. When Auctionator, TradeSkillMaster, or Oribos Exchange is installed, old gear worth more on the auction house (sold directly, or disenchanted first, net of the 5% auction cut) is held back with its reason instead of sold. A sale that fails stops the run and lists what is left with the
-reason, instead of retrying. Consumables compete one stack per buff slot: food, drink, flask, battle and guardian elixirs, healing and mana and resource and protection potions, bandages, scrolls, weapon consumables, and utility. The strongest number wins (item level, then your own primary stat, break ties), one full stack of it stays, and every loser sells, including any of the winner past that stack. Unrecognized items, one-of-a-kind effects (invisibility, water breathing, transforms, summons), quest items, and anything marked with `/vv protect` never sell. The vendor visit shows a confirm list with Sell All and Cancel unless auto-sell is on, and a sale stopped by a failed click lists what is left with the reason.
+reason, instead of retrying. Consumables compete one stack per buff slot: food, drink, flask, battle and guardian elixirs, healing and mana and resource and protection potions, bandages, scrolls, weapon consumables, and utility. The strongest number wins (item level, then your own primary stat, break ties), one full stack of it stays, and every loser sells, including any of the winner past that stack. Unrecognized items, one-of-a-kind effects (invisibility, water breathing, transforms, summons), quest items, and anything marked with `/vv protect` never sell. The vendor visit shows a confirm list with Sell All and Cancel unless auto-sell is on, and a sale stopped by a failed click lists what is left with the reason. `/vv diag` prints each buff slot's winner with its numbers for bug reports, and a sale the client itself blocks is announced by name instead of failing silently.
 When another junk-selling addon is loaded,
 VocVendor warns once and pauses its own auto-sell; `/vv on` turns it
 back on.

@@ -2427,4 +2427,48 @@ do
     #sale == 1 and sale[1].link == weak)
 end
 
+-- 82. Sale guards and diagnosis: a closed vendor stops cleanly, taint
+-- blocks announce, realistic descriptions still rank, /vv diag reports.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local weak = use(w, { sub = SC.Potion, price = 50, expansion = 0,
+    desc = "use: restores 66 health over 6 sec. requires level 1." })
+  local strong = use(w, { sub = SC.Potion, price = 200, expansion = 0,
+    desc = "use: restores 161 health over 7 sec. requires level 5." })
+  putStack(w, weak, 1)
+  putStack(w, strong, 1)
+  check("noise does not invert ranks",
+    ns.consumableBetter(ns.consumablePower(strong),
+      ns.consumablePower(weak)) == true)
+  -- Closed vendor: nothing attempted, everything explained.
+  w.merchantOpen = false
+  local sale = ns.collectConsumableSale()
+  check("closed vendor still collects", #sale == 1)
+  local n, _, leftover = ns.sellConsumableItems(sale)
+  check("closed vendor sells nothing", n == 0 and #w.sold == 0)
+  check("closed vendor says so", leftover[1].reason == "vendor closed")
+  w.merchantOpen = true
+  -- Taint blocks name the function; strangers stay silent.
+  local before = #w.printed
+  w.frame.onEvent(nil, "ADDON_ACTION_BLOCKED", "SomeOther", "UseContainerItem")
+  check("stranger blocks stay silent", #w.printed == before)
+  w.frame.onEvent(nil, "ADDON_ACTION_BLOCKED", "VocVendor", "UseContainerItem")
+  check("own block announces",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: the client blocked UseContainerItem (sale click refused; nothing sold - /reload and try once more)")
+  check("block recorded", ns.lastBlock == "UseContainerItem")
+  -- Diag reports the winner with its numbers and the sale rows.
+  w.env.SlashCmdList.VOCVENDOR("diag")
+  check("diag announces",
+    w.printed[#w.printed - 3] == "|cff66ccffVocVendor|r: consumable ranks:")
+  check("diag names the winner and its numbers",
+    w.printed[#w.printed - 2]:find("wins (161, ilvl 100)", 1, true) ~= nil)
+  check("diag lists the sale row",
+    w.printed[#w.printed - 1] == "    " .. weak .. " x1")
+  check("diag repeats the block",
+    w.printed[#w.printed] == "  blocked earlier: UseContainerItem")
+end
+
 print("ok - " .. passed .. " checks passed")

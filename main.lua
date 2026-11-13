@@ -520,13 +520,12 @@ function ns.slotCount(bag, slot)
   return tonumber(info.stackCount) or 1
 end
 
--- The losing consumables in the bags right now: every stack past the
--- winner's one full stack, plus every loser completely. Unranked items
--- (no spell data) and unplaced ones never appear here.
-function ns.collectConsumableSale()
-  if not ns.opts().sellConsumables then return {} end
+-- Confidently placed bag consumables, grouped by buff slot in first-seen
+-- order. Each item carries its slot, vendor price, and stack count.
+-- Not a sale: ranking (keep the winner) happens in ns.rankCategory, so
+-- the merchant sale and the diagnose readout share one implementation.
+function ns.groupConsumables(descs)
   local memo = {} -- collectible answers, per item ID
-  local descs = {} -- spell descriptions, per link: one read per scan
   local byCat, order = {}, {}
   for bag = 0, NUM_BAG_SLOTS do
     local slots = C_Container.GetContainerNumSlots(bag)
@@ -551,44 +550,60 @@ function ns.collectConsumableSale()
       end
     end
   end
-  local sale = {}
-  for _, cat in ipairs(order) do
-    local items = byCat[cat]
-    local ranked = {}
-    for _, it in ipairs(items) do
-      local p = ns.consumablePower(it.link, descs)
-      if p then
-        it.power = p
-        ranked[#ranked + 1] = it
+  return byCat, order
+end
+
+-- Ranked outcome for one category's items: the winning link, how many
+-- of it stay, and which stacks sell. Unranked items (no spell data)
+-- never appear in either list. A numberless winner proves nothing over
+-- other numbers: only identical stacks thin out, and different items
+-- all keep.
+function ns.rankCategory(items, descs)
+  local ranked = {}
+  for _, it in ipairs(items or {}) do
+    local p = ns.consumablePower(it.link, descs)
+    if p then
+      it.power = p
+      ranked[#ranked + 1] = it
+    end
+  end
+  if #ranked == 0 then return nil end
+  local winner = ranked[1]
+  for i = 2, #ranked do
+    if ns.consumableBetter(ranked[i].power, winner.power) then
+      winner = ranked[i]
+    end
+  end
+  local cap = ns.maxStack(winner.link)
+  local kept, sale = 0, {}
+  for _, it in ipairs(items) do
+    if it.power then
+      if it.link == winner.link then
+        local n = ns.slotCount(it.bag, it.slot)
+        if cap and kept + n > cap then
+          sale[#sale + 1] = it
+        else
+          kept = kept + n
+        end
+      elseif winner.power.num > 0 then
+        sale[#sale + 1] = it
       end
     end
-    if #ranked > 0 then
-      local winner = ranked[1]
-      for i = 2, #ranked do
-        if ns.consumableBetter(ranked[i].power, winner.power) then
-          winner = ranked[i]
-        end
-      end
-      -- A numberless winner proves nothing over other numbers: only
-      -- identical stacks thin out, and different items all keep.
-      local cap = ns.maxStack(winner.link)
-      local kept = 0
-      for _, it in ipairs(items) do
-        if it.power then
-          local loser = false
-          if it.link == winner.link then
-            local n = ns.slotCount(it.bag, it.slot)
-            if cap and kept + n > cap then
-              loser = true
-            else
-              kept = kept + n
-            end
-          elseif winner.power.num > 0 then
-            loser = true
-          end
-          if loser then sale[#sale + 1] = it end
-        end
-      end
+  end
+  return { winner = winner, kept = kept, sale = sale }
+end
+
+-- The losing consumables in the bags right now: every stack past the
+-- winner's one full stack, plus every loser completely.
+function ns.collectConsumableSale()
+  if not ns.opts().sellConsumables then return {} end
+  local descs = {} -- spell descriptions, per link: one read per scan
+  local byCat, order = ns.groupConsumables(descs)
+  local sale = {}
+  for _, cat in ipairs(order) do
+    local ranked = ns.rankCategory(byCat[cat], descs)
+    if ranked then
+      for _, it in ipairs(ranked.sale) do sale[#sale + 1] = it end
     end
   end
   return sale
@@ -607,7 +622,9 @@ function ns.sellConsumableItems(items)
   items = items or {}
   for i, it in ipairs(items) do
     local reason = nil
-    if C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
+    if not ns.merchantOpen() then
+      reason = "vendor closed"
+    elseif C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
       reason = "moved"
     elseif ns.isProtected(it.link) then
       reason = "protected"
@@ -657,6 +674,48 @@ function ns.mergeStacks(items)
     g.total = g.total + (it.price or 0) * n
   end
   return groups
+end
+
+-- A blocked sale click, named by the client. Taint blocks are engine
+-- events, not Lua errors, so no pcall ever sees them: without this the
+-- sale just reports "still in bags". Only our own blocks announce, with
+-- the function the client refused, so a silent failure becomes a fact.
+-- The last block stays on ns for /vv diag.
+function ns.onActionBlocked(isTainted, fn)
+  if isTainted ~= name then return end
+  ns.lastBlock = tostring(fn)
+  ns.say("the client blocked " .. tostring(fn)
+    .. " (sale click refused; nothing sold - /reload and try once more)")
+end
+
+-- Diagnose the consumable ranks from chat: one line per buff slot naming
+-- the winner with its parsed power and item level, how much of it stays,
+-- and how much sells, plus every sale row. No windows, no sales: facts
+-- for a bug report instead of memory.
+function ns.diagConsumables()
+  local descs = {}
+  local byCat, order = ns.groupConsumables(descs)
+  if #order == 0 then
+    ns.say("no ranked consumables in bags")
+    return
+  end
+  ns.say("consumable ranks:")
+  for _, cat in ipairs(order) do
+    local ranked = ns.rankCategory(byCat[cat], descs)
+    if ranked then
+      local w = ranked.winner.power
+      local what = #ranked.sale == 1 and "1 stack" or #ranked.sale .. " stacks"
+      print("  " .. cat .. ": " .. ranked.winner.link
+        .. " wins (" .. w.num .. ", ilvl " .. w.ilvl .. "): keeps "
+        .. ranked.kept .. ", sells " .. what)
+      for _, it in ipairs(ranked.sale) do
+        print("    " .. tostring(it.link) .. " x" .. (it.count or 1))
+      end
+    end
+  end
+  if ns.lastBlock then
+    print("  blocked earlier: " .. ns.lastBlock)
+  end
 end
 
 -- The sale itself, shared by the auto path and the confirm dialog: an
@@ -756,6 +815,16 @@ function ns.inEquipmentSet(bag, slot)
   return inSet == true
 end
 
+-- True while a merchant window is actually open. Sale clicks outside one
+-- silently do nothing (a confirm popup outlives its window), so the
+-- sale stops with a reason instead of a "still in bags" cascade.
+function ns.merchantOpen()
+  if type(MerchantFrame) ~= "table" then return false end
+  if type(MerchantFrame.IsShown) ~= "function" then return false end
+  local ok, shown = pcall(MerchantFrame.IsShown, MerchantFrame)
+  return ok and shown == true
+end
+
 -- Sells a candidate list, re-verifying each slot first: bags shift
 -- between the dry-run and the click, and we never sell the wrong item.
 -- Set membership and vendor value are rechecked too: a slot that joined
@@ -775,7 +844,9 @@ function ns.sellOldGearItems(items)
   items = items or {}
   for i, it in ipairs(items) do
     local reason = nil
-    if C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
+    if not ns.merchantOpen() then
+      reason = "vendor closed"
+    elseif C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
       reason = "moved"
     elseif ns.inEquipmentSet(it.bag, it.slot) then
       reason = "in equipment set"
@@ -2116,6 +2187,7 @@ ns.HELP = {
   "/vv destroy    delete dead expansion items (confirms each)",
   "/vv consume    sell losing consumables",
   "/vv protect    keep an item out of every sale",
+  "/vv diag       show consumable ranks",
   "/vv config     open Settings > AddOns > VocVendor",
   "/vv help       this list (/vocvendor works too)",
 }
@@ -2180,6 +2252,8 @@ SlashCmdList.VOCVENDOR = function(msg)
     ns.listProtected()
   elseif msg:sub(1, 8) == "protect " then
     ns.toggleProtect(raw:sub(9))
+  elseif msg == "diag" then
+    ns.diagConsumables()
   elseif msg == "config" then
     ns.openConfig()
   else
@@ -2196,7 +2270,8 @@ ns.frame:RegisterEvent("MERCHANT_SHOW")
 ns.frame:RegisterEvent("MERCHANT_CLOSED")
 ns.frame:RegisterEvent("BAG_UPDATE")
 ns.frame:RegisterEvent("QUEST_TURNED_IN")
-ns.frame:SetScript("OnEvent", function(_, event, arg1)
+ns.frame:RegisterEvent("ADDON_ACTION_BLOCKED")
+ns.frame:SetScript("OnEvent", function(_, event, arg1, arg2)
   if event == "ADDON_LOADED" and arg1 == name then
     -- The client replaces the SavedVariables global with the loaded
     -- table after our file ran, so rebind or settings never persist.
@@ -2218,5 +2293,7 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1)
     ns.refreshDeadWindow() -- and so does the delete list
   elseif event == "QUEST_TURNED_IN" then
     ns.refreshQuests() -- a new completion changes what counts as dead
+  elseif event == "ADDON_ACTION_BLOCKED" then
+    ns.onActionBlocked(arg1, arg2) -- our own taint blocks, named
   end
 end)
