@@ -31,6 +31,8 @@ while kept gear waits.
 /vv repair     repair now
 /vv disenchant open the disenchant list
 /vv destroy    delete dead expansion items (confirms each)
+/vv consume    sell losing consumables
+/vv protect    keep an item out of every sale
 /vv config     open Settings > AddOns > VocVendor
 /vv help       this list (/vocvendor works too)
 ```
@@ -49,6 +51,8 @@ Settings > AddOns > VocVendor, or `/vv config`:
 - Also sell Warbound (default off: alts can use it through the warbank)
 - Compare auction prices (default on: with Auctionator, TradeSkillMaster, or Oribos Exchange installed, gear worth more on the auction house is held back with its reason instead of sold)
 - Keep disenchantable gear (default on: enchanters disenchant it from the list instead of selling it)
+- Sell losing consumables (default on: keep one stack of the strongest food, flask, potion and more; the rest sells with junk. Unrecognized and special items never sell)
+- Auto-sell losing consumables (default off: sell them automatically on every vendor visit. Off shows a confirm list first)
 - Vendor <expansion> items (default off, all twelve from Classic to Midnight): check an expansion to sell everything the vendor buys from it, whatever the type. All keep gates still hold; dead leftovers the vendor refuses collect for confirmed delete instead
 
 Every change applies at once.
@@ -70,7 +74,8 @@ disenchant list first for enchanters. Each
 candidate is re-checked by bag slot right before it sells, so a bag
 that shifted between the dry run and the click never sells the wrong
 item. When Auctionator, TradeSkillMaster, or Oribos Exchange is installed, old gear worth more on the auction house (sold directly, or disenchanted first, net of the 5% auction cut) is held back with its reason instead of sold. A sale that fails stops the run and lists what is left with the
-reason, instead of retrying. When another junk-selling addon is loaded,
+reason, instead of retrying. Consumables compete one stack per buff slot: food, drink, flask, battle and guardian elixirs, healing and mana and resource and protection potions, bandages, scrolls, weapon consumables, and utility. The strongest number wins (item level, then your own primary stat, break ties), one full stack of it stays, and every loser sells, including any of the winner past that stack. Unrecognized items, one-of-a-kind effects (invisibility, water breathing, transforms, summons), quest items, and anything marked with `/vv protect` never sell. The vendor visit shows a confirm list with Sell All and Cancel unless auto-sell is on, and a sale stopped by a failed click lists what is left with the reason.
+When another junk-selling addon is loaded,
 VocVendor warns once and pauses its own auto-sell; `/vv on` turns it
 back on.
 Repairs mirror the merchant frame's own buttons: guild bank
@@ -81,7 +86,7 @@ disenchants that bag slot, and the list tracks the bags until empty. Dead items 
 
 ## What's inside
 
-- `main.lua`: the whole addon: the junk definition, auto-sell, auto-repair, the Sell Junk hook, the disenchant window, settings, slash
+- `main.lua`: the whole addon: the junk definition, auto-sell, auto-repair, the Sell Junk hook, the disenchant and delete windows, consumable keep-winner-sell-rest, settings, slash
 - `VocVendor.toc` / `VocVendor_Camelot.toc`: metadata for Retail and the Forever client
 - `tests/run.lua`: stub-harness regression tests, no WoW client needed
 

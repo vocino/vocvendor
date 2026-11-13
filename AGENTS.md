@@ -2,7 +2,7 @@
 
 ## Code Map
 
-- `main.lua`: the whole addon: the junk definition (grays, old gear, per-expansion checklist, delete list), auto-sell, auto-repair, the native Sell Junk hook, auction/disenchant compare, the disenchant and delete windows, Settings panel, slash, compartment
+- `main.lua`: the whole addon: the junk definition (grays, old gear, per-expansion checklist, delete list), auto-sell, auto-repair, the native Sell Junk hook, auction/disenchant compare, the disenchant and delete windows, consumable keep-winner-sell-rest, Settings panel, slash, compartment
 - `VocVendor.toc` / `VocVendor_Camelot.toc`: addon metadata (dual toc,
   shared `main.lua`; no `RequiredDeps`)
 - `tests/run.lua`: stub-harness regression tests (`lua tests/run.lua`)

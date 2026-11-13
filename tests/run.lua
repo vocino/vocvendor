@@ -24,7 +24,12 @@ local function loadAddon(world)
   g.SlashCmdList = {}
   g.NUM_BAG_SLOTS = 4
   g.Enum = {
-    ItemClass = { Weapon = 2, Armor = 4 },
+    ItemClass = { Consumable = 0, Weapon = 2, Armor = 4 },
+    ItemConsumableSubclass = { Generic = 0, Potion = 1, Elixir = 2,
+      Flasksphials = 3, Scroll = 4, Fooddrink = 5, Itemenhancement = 6,
+      Bandage = 7, Other = 8, VantusRune = 9, UtilityCurio = 10,
+      CombatCurio = 11, Relic = 12, Draught = 13, Device = 14,
+      ItemenhancementTemporary = 15 },
     ItemQuality = { Poor = 0, Common = 1, Uncommon = 2, Rare = 3, Epic = 4, Heirloom = 7 },
     ItemBind = { OnEquip = 2, OnAcquire = 1 },
   }
@@ -54,7 +59,8 @@ local function loadAddon(world)
     -- world.noContainerInfo simulates a client without that API.
     GetContainerItemInfo = function(bag, slot)
       if world.noContainerInfo then return nil end
-      return { hasNoValue = world.noValues[bag .. ":" .. slot] == true }
+      return { hasNoValue = world.noValues[bag .. ":" .. slot] == true,
+        stackCount = world.stackCounts[bag .. ":" .. slot] }
     end,
     PickupContainerItem = function(bag, slot)
       world.cursor = { bag = bag, slot = slot }
@@ -68,7 +74,7 @@ local function loadAddon(world)
     GetItemInfo = function(link)
       if world.uncached[link] then return nil end
       return link, link, world.rarities[link], world.levels[link],
-        world.minLevels[link], nil, nil, nil, world.slots[link], nil,
+        world.minLevels[link], nil, nil, world.maxStacks[link], world.slots[link], nil,
         world.prices[link], world.classIDs[link], world.subclassIDs[link],
         world.bindTypes[link], world.expansions[link], world.setIDs[link], nil, nil
     end,
@@ -171,7 +177,21 @@ local function loadAddon(world)
   g.IsMouseButtonDown = function() return false end
   g.C_Spell = {
     GetSpellName = function(spellID) return world.deSpellName end,
+    -- world.spellDescs[spellID] is the Use-spell description text the
+    -- consumable ranker parses numbers and keywords from.
+    GetSpellDescription = function(spellID) return world.spellDescs[spellID] end,
   }
+  -- world.itemSpells[link] = { name, spellID } marks a consumable's
+  -- Use effect; a link without one has no parseable power.
+  g.C_Item.GetItemSpell = function(link)
+    local s = world.itemSpells[link]
+    if not s then return nil end
+    return s[1], s[2]
+  end
+  g.UnitStat = function(_, i) return (world.unitStats or {})[i] end
+  -- world.denySecrets simulates the client refusing a secret read:
+  -- the gated code must degrade, never error.
+  g.canaccessvalue = function() return world.denySecrets ~= true end
   local function makeFrame(ftype, fname, template)
     local f = { events = {}, scripts = {}, attrs = {}, ctype = ftype,
       cname = fname, ctemplate = template, shown = false }
@@ -276,6 +296,9 @@ local function loadAddon(world)
   g.StaticPopup_Show = function(which, a, b, data)
     world.popups[#world.popups + 1] = { which = which, a = a, b = b, data = data }
   end
+  g.StaticPopup_Hide = function(which, data)
+    world.hiddenPopups[#world.hiddenPopups + 1] = { which = which, data = data }
+  end
   g.Settings = {
     RegisterVerticalLayoutCategory = function(n)
       world.settingsCategory = n
@@ -341,6 +364,8 @@ local function newWorld()
     blizzClicked = false, hookedClick = {}, hooks = {}, buttonEnabled = nil,
     playedSounds = {}, noValues = {},
     removed = {}, stuck = {}, sellErrors = {},
+    itemSpells = {}, spellDescs = {}, unitStats = {}, hiddenPopups = {},
+    stackCounts = {}, maxStacks = {},
     cosmetic = {}, transmogSet = {}, noTransmog = {},
     toyInfo = {}, ownedToys = {}, petSpecies = {}, petOwned = {},
     artifactPower = {}, completedQuestIDs = {}, questTitles = {},
@@ -381,6 +406,40 @@ end
 local function putBag(w, link)
   w.bags[0] = w.bags[0] or {}
   w.bags[0][#w.bags[0] + 1] = link
+  return 0, #w.bags[0]
+end
+
+-- Consumable factory: unique link with the fields the consumable sale
+-- reads. sub is an ItemConsumableSubclass ID; desc is the Use-spell
+-- description; noSpell leaves the item without one (unranked).
+local useSeq = 0
+local function use(w, o)
+  o = o or {}
+  useSeq = useSeq + 1
+  local link = "item:use" .. useSeq
+  w.itemIDs[link] = 5000 + useSeq
+  w.slots[link] = ""
+  w.classIDs[link] = o.class or 0 -- Consumable
+  w.subclassIDs[link] = o.sub or 5
+  w.rarities[link] = o.rarity or 1
+  w.levels[link] = o.ilvl or 100
+  w.minLevels[link] = o.minLevel or 1
+  w.prices[link] = o.price or 100
+  w.expansions[link] = o.expansion or 10
+  w.maxStacks[link] = o.max or 20
+  if not o.noSpell then
+    local sid = 9000 + useSeq
+    w.itemSpells[link] = { "UseEffect" .. useSeq, sid }
+    w.spellDescs[sid] = o.desc or ""
+  end
+  return link
+end
+
+-- Put a link in bag 0 holding n items.
+local function putStack(w, link, n)
+  w.bags[0] = w.bags[0] or {}
+  w.bags[0][#w.bags[0] + 1] = link
+  w.stackCounts["0:" .. #w.bags[0]] = n or 1
   return 0, #w.bags[0]
 end
 
@@ -884,7 +943,7 @@ do
   check("autoSell setting", w.env.Settings and w.settingsReg["VocVendor_autoSell"] ~= nil)
   check("gap slider", w.settingsSliders == 1)
   check("gap default", w.settingsReg["VocVendor_oldGearIlvlGap"].default == 30)
-  check("checkboxes", w.settingsChecks == 21)
+  check("checkboxes", w.settingsChecks == 23)
   check("legion setting", w.settingsReg["VocVendor_sellLegion"] ~= nil)
   check("legion default off", w.settingsReg["VocVendor_sellLegion"].default == false)
   check("midnight current label",
@@ -2004,6 +2063,277 @@ do
   w.env.VocVendor_CompartmentClick("VocVendor", "LeftButton")
   check("left opens the disenchant list",
     ns.deWindow ~= nil and ns.deWindow:IsShown())
+end
+
+-- 74. Categories never overlap: one buff slot per item, and anything
+-- unrecognized or special never gets one.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local function cat(sub, desc)
+    return ns.consumableCategory(use(w, { sub = sub, desc = desc }))
+  end
+  check("food buffs", cat(SC.Fooddrink,
+    "use: well fed. increases strength by 100 for 1 hour.") == "food")
+  check("drink mana", cat(SC.Fooddrink,
+    "use: restores 50000 mana over 27 sec. must remain seated.") == "drink")
+  check("plain bread", cat(SC.Fooddrink,
+    "use: restores 30000 health over 27 sec. must remain seated.") == "food")
+  check("flask", cat(SC.Flasksphials,
+    "use: increases strength by 300 for 2 hours.") == "flask")
+  check("battle elixir", cat(SC.Elixir,
+    "use: increases attack power by 200 for 1 hour.") == "battle")
+  check("guardian elixir", cat(SC.Elixir,
+    "use: increases stamina by 250 and armor by 100 for 1 hour.") == "guardian")
+  check("mixed elixir keeps", cat(SC.Elixir,
+    "use: increases strength by 100 and armor by 100 for 1 hour.") == nil)
+  check("healing potion", cat(SC.Potion,
+    "use: restores 100000 health.") == "healpotion")
+  check("mana potion", cat(SC.Potion,
+    "use: restores 80000 mana.") == "manapotion")
+  check("dual potion routes by number", cat(SC.Potion,
+    "use: restores 40000 health and 60000 mana.") == "manapotion")
+  check("rage potion", cat(SC.Potion,
+    "use: restores 100 rage.") == "resource:rage")
+  check("fire protection", cat(SC.Potion,
+    "use: absorbs 50000 fire damage for 1 hour.") == "protection:fire")
+  check("bandage", cat(SC.Bandage,
+    "use: heals 80000 damage over 8 sec.") == "bandage")
+  check("scroll", cat(SC.Scroll,
+    "use: increases intellect by 50 for 30 min.") == "scroll")
+  check("weapon oil", cat(SC.Itemenhancement,
+    "use: grants +30 attack power for 1 hour.") == "weapon")
+  check("augment rune", cat(SC.Draught,
+    "use: increases primary stat by 1801 for 1 hour.") == "utility")
+  check("invisibility never sells", cat(SC.Potion,
+    "use: turns you invisible for 18 sec.") == nil)
+  check("water breathing never sells", cat(SC.Potion,
+    "use: allows water breathing for 10 min.") == nil)
+  check("summon never sells", cat(SC.Potion,
+    "use: summons a delicious picnic for 10 min.") == nil)
+  check("unknown subclass never sells", cat(SC.Other,
+    "use: does something mysterious for 1 hour.") == nil)
+  check("device never sells", cat(SC.Device,
+    "use: increases strength by 500 for 1 hour.") == nil)
+  check("gear is no category",
+    ns.consumableCategory(gear(w, {})) == nil)
+end
+
+-- 75. Power ranking is tiered: number, then item level, then spec fit,
+-- and a stronger off-spec item still wins.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local weak = use(w, { sub = SC.Potion,
+    desc = "use: restores 50000 health.", ilvl = 100 })
+  local strong = use(w, { sub = SC.Potion,
+    desc = "use: restores 100000 health.", ilvl = 50 })
+  check("stronger number wins",
+    ns.consumableBetter(ns.consumablePower(strong),
+      ns.consumablePower(weak)) == true)
+  check("level does not save the weaker",
+    ns.consumableBetter(ns.consumablePower(weak),
+      ns.consumablePower(strong)) == false)
+  local lo = use(w, { sub = SC.Flasksphials,
+    desc = "use: increases strength by 300.", ilvl = 100 })
+  local hi = use(w, { sub = SC.Flasksphials,
+    desc = "use: increases strength by 300.", ilvl = 120 })
+  check("ilvl breaks number ties",
+    ns.consumableBetter(ns.consumablePower(hi),
+      ns.consumablePower(lo)) == true)
+  w.unitStats = { [1] = 500, [2] = 100, [4] = 100 } -- strength main
+  local str = use(w, { sub = SC.Flasksphials,
+    desc = "use: increases strength by 300.", ilvl = 100 })
+  local agi = use(w, { sub = SC.Flasksphials,
+    desc = "use: increases agility by 300.", ilvl = 100 })
+  check("spec fit breaks ilvl ties",
+    ns.consumableBetter(ns.consumablePower(str),
+      ns.consumablePower(agi)) == true)
+  local offspec = use(w, { sub = SC.Flasksphials,
+    desc = "use: increases agility by 900.", ilvl = 50 })
+  check("stronger off-spec still wins",
+    ns.consumableBetter(ns.consumablePower(offspec),
+      ns.consumablePower(str)) == true)
+  w.denySecrets = true -- the client refuses the read: no preference, no error
+  check("secret stats read as no preference", ns.playerStatWord() == nil)
+  w.denySecrets = false
+  check("open stats read again", ns.playerStatWord() == "strength")
+end
+
+-- 76. The winner keeps one stack even when unusable; losers sell even
+-- when usable; protected items sit out.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.unitStats = { [1] = 500, [2] = 100, [4] = 100 }
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local weak = use(w, { sub = SC.Potion, price = 50, minLevel = 1,
+    desc = "use: restores 20000 health." })
+  local strong = use(w, { sub = SC.Potion, price = 200, minLevel = 70,
+    desc = "use: restores 90000 health." })
+  putStack(w, weak, 5)
+  putStack(w, strong, 3)
+  local sale = ns.collectConsumableSale()
+  check("only the loser sells", #sale == 1 and sale[1].link == weak)
+  check("winner kept despite level", sale[1].link ~= strong)
+  -- Two winner stacks: only the overflow sells.
+  local w2 = newWorld()
+  local ns2 = loadAddon(w2)
+  clientLoaded(w2)
+  w2.unitStats = { [1] = 500, [2] = 100, [4] = 100 }
+  local big = use(w2, { sub = SC.Potion, price = 10, max = 20,
+    desc = "use: restores 90000 health." })
+  local small = use(w2, { sub = SC.Potion, price = 10, max = 20,
+    desc = "use: restores 20000 health." })
+  putStack(w2, big, 20)
+  putStack(w2, big, 20)
+  putStack(w2, small, 1)
+  local sale2 = ns2.collectConsumableSale()
+  check("overflow and loser sell",
+    #sale2 == 2 and sale2[1].link == big and sale2[2].link == small)
+  -- Protected items never appear, and unprotecting returns them.
+  ns2.toggleProtect(big)
+  check("protected announced",
+    w2.printed[#w2.printed] == "|cff66ccffVocVendor|r: protected: " .. big)
+  local sale3 = ns2.collectConsumableSale()
+  check("protected winner sits out, rest wins the pool",
+    #sale3 == 0)
+  ns2.toggleProtect(big)
+  check("unprotect announced",
+    w2.printed[#w2.printed] == "|cff66ccffVocVendor|r: no longer protected: " .. big)
+  check("unprotected winner overflows again",
+    #ns2.collectConsumableSale() == 2)
+end
+
+-- 77. Vendor behavior: confirm by default, auto with the toggle, and a
+-- visit ends with at most one winner stack per category.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.unitStats = { [1] = 500, [2] = 100, [4] = 100 }
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local weak = use(w, { sub = SC.Potion, price = 50,
+    desc = "use: restores 20000 health." })
+  local strong = use(w, { sub = SC.Potion, price = 200,
+    desc = "use: restores 90000 health." })
+  putStack(w, weak, 2)
+  putStack(w, strong, 1)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("confirm popup by default", #w.popups == 1
+    and w.popups[1].which == "VOCVENDOR_SELL_CONSUMABLES")
+  check("confirm lists the loser", w.popups[1].data.items[1].link == weak)
+  check("nothing sold before Sell All", #w.sold == 0)
+  w.env.StaticPopupDialogs["VOCVENDOR_SELL_CONSUMABLES"].OnAccept(
+    nil, w.popups[1].data)
+  check("Sell All sells the loser", #w.sold == 1)
+  check("summary names the sale",
+    w.printed[3] == "|cff66ccffVocVendor|r: sold losing consumables (2 items for 1s 0c):")
+  -- Auto path: sells on open with a summary, no popup.
+  local a = newWorld()
+  local nsa = loadAddon(a)
+  clientLoaded(a)
+  a.unitStats = { [1] = 500, [2] = 100, [4] = 100 }
+  local weakA = use(a, { sub = SC.Potion, price = 50,
+    desc = "use: restores 20000 health." })
+  local strongA = use(a, { sub = SC.Potion, price = 200,
+    desc = "use: restores 90000 health." })
+  putStack(a, weakA, 2)
+  putStack(a, strongA, 1)
+  nsa.opts().autoSellConsumables = true
+  a.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("auto path needs no popup", #a.popups == 0)
+  check("auto path sells", #a.sold == 1)
+  check("auto path summarizes",
+    a.printed[1] == "|cff66ccffVocVendor|r: sold losing consumables (2 items for 1s 0c):")
+  a.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("success check: one winner stack left",
+    #nsa.collectConsumableSale() == 0)
+  -- Master toggle off: the visit ignores consumables.
+  local o = newWorld()
+  local nso = loadAddon(o)
+  clientLoaded(o)
+  putStack(o, use(o, { sub = SC.Potion, price = 50,
+    desc = "use: restores 20000 health." }), 1)
+  nso.opts().sellConsumables = false
+  o.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("master off sells nothing", #o.sold == 0 and #o.popups == 0)
+  nso.opts().sellConsumables = true
+  nso.refreshConsumablePopup()
+  check("master on keeps no hide", #o.hiddenPopups == 0)
+  nso.opts().sellConsumables = false
+  nso.refreshConsumablePopup()
+  check("master off withdraws the confirm", #o.hiddenPopups == 1
+    and o.hiddenPopups[1].which == "VOCVENDOR_SELL_CONSUMABLES")
+end
+
+-- 78. Slash: /vv consume needs a vendor; /vv protect toggles and lists.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local weak = use(w, { sub = SC.Potion, price = 50,
+    desc = "use: restores 20000 health." })
+  local strong = use(w, { sub = SC.Potion, price = 200,
+    desc = "use: restores 90000 health." })
+  putStack(w, weak, 1)
+  putStack(w, strong, 1)
+  w.merchantOpen = false
+  w.env.SlashCmdList.VOCVENDOR("consume")
+  check("consume needs a vendor",
+    w.printed[1] == "|cff66ccffVocVendor|r: open a vendor first")
+  check("consume sells nothing outside", #w.sold == 0)
+  w.merchantOpen = true
+  w.env.SlashCmdList.VOCVENDOR("consume")
+  check("consume confirms at the vendor", #w.popups == 1
+    and w.popups[1].which == "VOCVENDOR_SELL_CONSUMABLES")
+  w.env.SlashCmdList.VOCVENDOR("protect " .. weak)
+  check("protect announces",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: protected: " .. weak)
+  check("protected loser leaves the sale",
+    #ns.collectConsumableSale() == 0)
+  w.env.SlashCmdList.VOCVENDOR("protect")
+  check("protect lists", w.printed[#w.printed] == "  " .. weak)
+  w.env.SlashCmdList.VOCVENDOR("protect bogus")
+  check("protect rejects garbage",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: couldn't find that item (shift-click it or give its itemID)")
+end
+
+-- 79. Never-sell guards hold end to end: quest, unrecognized, special,
+-- uncached, and unsellable items never reach the sale.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local quest = use(w, { sub = SC.Potion, price = 50,
+    desc = "use: restores 99999 health." })
+  w.classIDs[quest] = 12 -- quest item: keeps unless proven dead
+  local strange = use(w, { sub = SC.Other, price = 50,
+    desc = "use: does something mysterious." })
+  local invis = use(w, { sub = SC.Potion, price = 50,
+    desc = "use: turns you invisible for 18 sec." })
+  local uncached = use(w, { sub = SC.Potion, price = 50,
+    desc = "use: restores 88888 health." })
+  w.uncached[uncached] = true
+  local worthless = use(w, { sub = SC.Potion, price = 0,
+    desc = "use: restores 77777 health." })
+  local nosuch = use(w, { sub = SC.Potion, price = 50, noSpell = true,
+    desc = "use: restores 66666 health." })
+  putStack(w, quest, 1)
+  putStack(w, strange, 1)
+  putStack(w, invis, 1)
+  putStack(w, uncached, 1)
+  putStack(w, worthless, 1)
+  putStack(w, nosuch, 1)
+  local sale = ns.collectConsumableSale()
+  check("nothing unguarded sells", #sale == 0)
 end
 
 print("ok - " .. passed .. " checks passed")

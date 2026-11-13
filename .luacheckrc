@@ -33,7 +33,8 @@ read_globals = {
   "C_QuestLog", -- dead-quest title set (QuestLogDocumentation, live + forever)
   "DeleteCursorItem", -- bare C global, HasRestrictions: confirm click only
   "PlayerHasToy", -- bare C global; Blizzard still calls it bare on both clients
-  "CreateFrame", "GetInventoryItemLink", "GetMoney",
+  "CreateFrame", "GetInventoryItemLink", "GetMoney", "UnitStat", -- spec-fit tiebreak
+  "canaccessvalue", -- secret-aware stat reads, presence-gated (as in VocXP)
   "InCombatLockdown", -- combat guards on every click path (live + forever)
   "IsMouseButtonDown", "UIParent", "UISpecialFrames",
   "MerchantFrame", "MerchantSellAllJunkButton", -- native Sell Junk hook (MerchantFrame.xml, live + forever)
@@ -42,7 +43,7 @@ read_globals = {
   "RepairAllItems", -- mirror of the merchant repair buttons (live + forever)
   "Settings", -- native panel, retried at PLAYER_LOGIN (live + forever)
   "MinimalSliderWithSteppersMixin", -- slider label formatter, presence-gated
-  "StaticPopup_Show",
+  "StaticPopup_Show", "StaticPopup_Hide", -- Sell All confirms (live + forever)
   "Enum", -- ItemClass/ItemBind/ItemQuality values identical on both clients
   "PlaySound", "SOUNDKIT", -- presence-gated; ns.play falls back to numeric IDs
   "GameTooltip",

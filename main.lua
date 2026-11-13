@@ -110,6 +110,9 @@ local defaults = {
   oldGearWarbound = false,-- include Warbound in old gear
   keepDisenchantable = true,
   compareAuction = true,  -- skip vendor sale when auction nets more
+  sellConsumables = true, -- keep one stack of the strongest per category
+  autoSellConsumables = false, -- ...automatically, or behind a confirm list
+  protectedItems = {},    -- item IDs that never sell (/vv protect)
 }
 -- Per-expansion checklist: one opt-in boolean per expansion, all off.
 -- (The old Midnight keep toggle is gone; an unchecked Midnight row
@@ -226,6 +229,211 @@ function ns.compareItem(vendor, auction, deValue)
   if auctionNet > vendor then return "auction" end
   return "vendor"
 end
+-- Losing consumables: one stack of the strongest per buff slot, the rest
+-- vendors. A category is a buff slot (food, flask, battle elixir, ...):
+-- two consumables in it never stack, so the strongest wins and every
+-- other stack sells, including any of the winner past one full stack.
+-- Placement is conservative: an unknown subclass, an unparsed effect, or
+-- a special one-of-a-kind effect never sells, whatever its power. Only
+-- bags are read, only the vendor buys, nothing is ever deleted.
+ns.CONSUMABLE_SPECIAL = {
+  "invisib", "water breath", "transform", "summon", "teleport", "portal",
+  "resurrect", "polymorph", "mind control",
+}
+ns.OFFENSE_WORDS = { "strength", "agility", "intellect", "attack power",
+  "critical", "haste", "mastery", "versatility", "damage", "primary stat" }
+ns.DEFENSE_WORDS = { "stamina", "armor", "dodge", "parry", "block",
+  "avoidance", "absorb" }
+ns.RESOURCE_WORDS = { "rage", "energy", "focus", "runic", "fury", "insanity" }
+ns.RESIST_WORDS = { "fire", "frost", "shadow", "nature", "arcane" }
+
+local function hasAny(desc, words)
+  for _, w in ipairs(words) do
+    if desc:find(w, 1, true) then return true end
+  end
+  return false
+end
+
+-- The item's Use-spell description, lowercased for keyword matching, or
+-- nil when the client cannot say. Presence-gated and pcall-guarded: an
+-- unknown spell keeps the item, never sells it.
+function ns.consumableDesc(link)
+  if type(C_Item) ~= "table" or type(C_Item.GetItemSpell) ~= "function" then
+    return nil
+  end
+  local ok, _, spellID = pcall(C_Item.GetItemSpell, link)
+  if not ok or type(spellID) ~= "number" then return nil end
+  if type(C_Spell) ~= "table"
+    or type(C_Spell.GetSpellDescription) ~= "function" then
+    return nil
+  end
+  local okD, desc = pcall(C_Spell.GetSpellDescription, spellID)
+  if not okD or type(desc) ~= "string" or desc == "" then return nil end
+  return desc:lower()
+end
+
+function ns.isSpecialConsumable(desc)
+  return hasAny(desc, ns.CONSUMABLE_SPECIAL)
+end
+
+-- Potion routing by what the description restores: health, mana, another
+-- resource, or a resistance. Health-and-mana both compete where the
+-- larger number is; anything else unrecognized keeps.
+function ns.potionCategory(desc)
+  for _, res in ipairs(ns.RESIST_WORDS) do
+    if desc:find(res, 1, true)
+      and (desc:find("absorb", 1, true) or desc:find("resist", 1, true)
+        or desc:find("protect", 1, true) or desc:find("ward", 1, true)) then
+      return "protection:" .. res
+    end
+  end
+  local function nearNum(word)
+    local n = desc:match("([%d,]+)%s+" .. word)
+    n = n and n:gsub(",", "")
+    return tonumber(n) or 0
+  end
+  local health = desc:find("health", 1, true) ~= nil
+    and (desc:find("restor", 1, true) or desc:find("replenish", 1, true)
+      or desc:find("heal", 1, true) or desc:find("regen", 1, true))
+  local mana = desc:find("mana", 1, true) ~= nil
+    and (desc:find("restor", 1, true) or desc:find("replenish", 1, true)
+      or desc:find("regen", 1, true))
+  if health and not mana then return "healpotion" end
+  if mana and not health then return "manapotion" end
+  if health and mana then
+    if nearNum("health") >= nearNum("mana") then return "healpotion" end
+    return "manapotion"
+  end
+  for _, res in ipairs(ns.RESOURCE_WORDS) do
+    if desc:find(res, 1, true) then return "resource:" .. res end
+  end
+  return nil
+end
+
+-- The buff slot for a consumable link, or nil when the addon cannot
+-- confidently place it. Never invents a category: subclass first, then
+-- the spell description refines it, and anything ambiguous keeps.
+function ns.consumableCategory(link)
+  if type(C_Item) ~= "table" or type(C_Item.GetItemInfo) ~= "function" then
+    return nil
+  end
+  if type(Enum) ~= "table" or type(Enum.ItemClass) ~= "table" then return nil end
+  local r = { pcall(C_Item.GetItemInfo, link) }
+  if not r[1] then return nil end
+  if r[13] ~= Enum.ItemClass.Consumable then return nil end -- 12th return
+  local sub = r[14] -- 13th return
+  local SC = Enum.ItemConsumableSubclass
+  if type(SC) ~= "table" then return nil end
+  if sub == SC.Flasksphials then return "flask" end
+  if sub == SC.Bandage then return "bandage" end
+  if sub == SC.Scroll then return "scroll" end
+  if sub == SC.Itemenhancement or sub == SC.ItemenhancementTemporary then
+    local desc = ns.consumableDesc(link)
+    if not desc or ns.isSpecialConsumable(desc) then return nil end
+    if hasAny(desc, ns.OFFENSE_WORDS) or hasAny(desc, ns.DEFENSE_WORDS) then
+      return "weapon"
+    end
+    return nil
+  end
+  if sub == SC.Draught or sub == SC.VantusRune then
+    local desc = ns.consumableDesc(link)
+    if not desc or ns.isSpecialConsumable(desc) then return nil end
+    if hasAny(desc, ns.OFFENSE_WORDS) or hasAny(desc, ns.DEFENSE_WORDS) then
+      return "utility"
+    end
+    return nil
+  end
+  if sub == SC.Elixir or sub == SC.Fooddrink or sub == SC.Potion then
+    local desc = ns.consumableDesc(link)
+    if not desc or ns.isSpecialConsumable(desc) then return nil end
+    if sub == SC.Potion then return ns.potionCategory(desc) end
+    if sub == SC.Elixir then
+      local off = hasAny(desc, ns.OFFENSE_WORDS)
+      local def = hasAny(desc, ns.DEFENSE_WORDS)
+      if off and not def then return "battle" end
+      if def and not off then return "guardian" end
+      return nil
+    end
+    -- Fooddrink: a buff makes it food; mana without a buff is a drink;
+    -- plain health restores are food.
+    local buff = desc:find("well fed", 1, true) ~= nil
+      or hasAny(desc, ns.OFFENSE_WORDS) or desc:find("stamina", 1, true)
+    if buff then return "food" end
+    if desc:find("mana", 1, true) then return "drink" end
+    if desc:find("health", 1, true) then return "food" end
+    return nil
+  end
+  return nil
+end
+
+-- The largest number in a spell description (thousands separators
+-- stripped): heals, restores, and stat buffs all read as one number.
+function ns.spellPower(desc)
+  local best = 0
+  for num in desc:gmatch("(%d[%d,]*)") do
+    local n = tonumber((num:gsub(",", "")))
+    if n and n > best then best = n end
+  end
+  return best
+end
+
+-- The player's own primary stat as a description keyword, or nil on a
+-- tie, a refused read, or a missing API. Strength, agility, and
+-- intellect are UnitStat 1, 2, and 4; the highest is the spec's stat.
+-- Secret values (Midnight) error on compare, so the literal
+-- canaccessvalue guard below owns the comparisons, the way VocXP's
+-- aura reads do; without the API there is nothing to refuse.
+function ns.playerStatWord()
+  if type(UnitStat) ~= "function" then return nil end
+  local s, a, g = 0, 0, 0
+  local okS, vs = pcall(UnitStat, "player", 1)
+  if okS and type(vs) == "number" then s = vs end
+  local okA, va = pcall(UnitStat, "player", 2)
+  if okA and type(va) == "number" then a = va end
+  local okG, vg = pcall(UnitStat, "player", 4)
+  if okG and type(vg) == "number" then g = vg end
+  if canaccessvalue then
+    if not canaccessvalue(s) or not canaccessvalue(a)
+      or not canaccessvalue(g) then
+      return nil
+    end
+  end
+  if s > a and s > g then return "strength" end
+  if a > s and a > g then return "agility" end
+  if g > s and g > a then return "intellect" end
+  return nil
+end
+
+-- Rankable power for a consumable, or nil when the client cannot say.
+-- Identical items are always comparable; different items need a parsed
+-- number on the winning side (see collectConsumableSale).
+function ns.consumablePower(link)
+  local desc = ns.consumableDesc(link)
+  if not desc then return nil end
+  local id = ns.itemID(link)
+  local ilvl = 0
+  if type(C_Item.GetDetailedItemLevelInfo) == "function" then
+    local okL, lvl = pcall(C_Item.GetDetailedItemLevelInfo, link)
+    if okL and type(lvl) == "number" then ilvl = lvl end
+  end
+  return { num = ns.spellPower(desc), ilvl = ilvl, id = id or 0, desc = desc }
+end
+
+-- True when a outranks b. Raw number, then item level, then the
+-- player's own primary stat (a stronger off-spec item still beats a
+-- weaker on-spec one), then the lower item ID for determinism.
+function ns.consumableBetter(a, b)
+  if a.num ~= b.num then return a.num > b.num end
+  if a.ilvl ~= b.ilvl then return a.ilvl > b.ilvl end
+  local stat = ns.playerStatWord()
+  if stat then
+    local fa = a.desc:find(stat, 1, true) ~= nil
+    local fb = b.desc:find(stat, 1, true) ~= nil
+    if fa ~= fb then return fa end
+  end
+  return (a.id or 0) < (b.id or 0)
+end
+
 -- The configured junk right now: gray count (Blizzard's definition) plus
 -- the old-gear list when the player opted it into the definition.
 function ns.collectJunk()
@@ -242,6 +450,257 @@ function ns.collectJunk()
   -- The checklist is its own consent: no parent toggle gates it.
   local expJunk = ns.collectExpansionJunk()
   return { grayCount = grayCount, oldGear = oldGear, expJunk = expJunk }
+end
+
+-- Protected items never sell. Marked on the slash line
+-- (/vv protect): the SavedVariables set holds item IDs, and the stored
+-- link (when marked by link) names them back in /vv protect with no
+-- argument. Not a registered setting: free text lives on the slash
+-- line (FAMILY.md "Settings").
+function ns.isProtected(link)
+  local id = ns.itemID(link)
+  return id ~= nil and type(ns.db) == "table"
+    and type(ns.db.protectedItems) == "table"
+    and ns.db.protectedItems[id] ~= nil
+end
+
+---@param text string
+function ns.toggleProtect(text)
+  text = strtrim(text or "")
+  local id = nil
+  if text:find("item:", 1, true) then id = ns.itemID(text) end
+  if not id then id = tonumber(text) end
+  if not id then
+    ns.say("couldn't find that item (shift-click it or give its itemID)")
+    return
+  end
+  if type(ns.db.protectedItems) ~= "table" then ns.db.protectedItems = {} end
+  local shown = text:find("item:", 1, true) and text or ("item:" .. id)
+  if ns.db.protectedItems[id] then
+    ns.db.protectedItems[id] = nil
+    ns.say("no longer protected: " .. shown)
+  else
+    ns.db.protectedItems[id] = text:find("item:", 1, true) and text or true
+    ns.say("protected: " .. shown)
+  end
+end
+
+function ns.listProtected()
+  local n = 0
+  for id, shown in pairs(ns.db.protectedItems or {}) do
+    n = n + 1
+    print("  " .. tostring(type(shown) == "string" and shown or ("item:" .. id)))
+  end
+  if n == 0 then ns.say("nothing protected") end
+end
+
+-- One full stack for a consumable link (its own max stack), nil when
+-- the client cannot say: then a winner never counts as over-kept.
+function ns.maxStack(link)
+  if type(C_Item) ~= "table" or type(C_Item.GetItemInfo) ~= "function" then
+    return nil
+  end
+  local r = { pcall(C_Item.GetItemInfo, link) }
+  if not r[1] then return nil end
+  return tonumber(r[9]) -- 8th return
+end
+
+-- Items in a bag slot, 1 when the client cannot say.
+function ns.slotCount(bag, slot)
+  if type(C_Container) ~= "table" then return 1 end
+  if type(C_Container.GetContainerItemInfo) ~= "function" then return 1 end
+  local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+  if not ok or type(info) ~= "table" then return 1 end
+  return tonumber(info.stackCount) or 1
+end
+
+-- The losing consumables in the bags right now: every stack past the
+-- winner's one full stack, plus every loser completely. Unranked items
+-- (no spell data) and unplaced ones never appear here.
+function ns.collectConsumableSale()
+  if not ns.opts().sellConsumables then return {} end
+  local memo = {}
+  local byCat, order = {}, {}
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      local link = C_Container.GetContainerItemLink(bag, slot)
+      if link and not ns.isProtected(link)
+        and ns.slotHasValue(bag, slot) and not ns.questKeeps(link)
+        and not ns.isUncollectedCollectible(link, memo) then
+        local _, _, _, _, _, _, _, _, _, _, sellPrice = C_Item.GetItemInfo(link)
+        if sellPrice and sellPrice > 0 then
+          local cat = ns.consumableCategory(link)
+          if cat then
+            if not byCat[cat] then
+              byCat[cat] = {}
+              order[#order + 1] = cat
+            end
+            byCat[cat][#byCat[cat] + 1] = { link = link, bag = bag,
+              slot = slot, price = sellPrice,
+              count = ns.slotCount(bag, slot) }
+          end
+        end
+      end
+    end
+  end
+  local sale = {}
+  for _, cat in ipairs(order) do
+    local items = byCat[cat]
+    local ranked = {}
+    for _, it in ipairs(items) do
+      local p = ns.consumablePower(it.link)
+      if p then
+        it.power = p
+        ranked[#ranked + 1] = it
+      end
+    end
+    if #ranked > 0 then
+      local winner = ranked[1]
+      for i = 2, #ranked do
+        if ns.consumableBetter(ranked[i].power, winner.power) then
+          winner = ranked[i]
+        end
+      end
+      -- A numberless winner proves nothing over other numbers: only
+      -- identical stacks thin out, and different items all keep.
+      local cap = ns.maxStack(winner.link)
+      local kept = 0
+      for _, it in ipairs(items) do
+        if it.power then
+          local loser = false
+          if it.link == winner.link then
+            local n = ns.slotCount(it.bag, it.slot)
+            if cap and kept + n > cap then
+              loser = true
+            else
+              kept = kept + n
+            end
+          elseif winner.power.num > 0 then
+            loser = true
+          end
+          if loser then sale[#sale + 1] = it end
+        end
+      end
+    end
+  end
+  return sale
+end
+
+-- Sells a consumable list, re-verifying each slot first like the old-gear
+-- sale does. A protection marked after the confirm still holds at the
+-- click. Same stop-on-failure contract, same leftover report.
+function ns.sellConsumableItems(items)
+  local n, value = 0, 0
+  local leftover = {}
+  if type(C_Container) ~= "table" then return n, value, leftover end
+  if type(C_Container.GetContainerItemLink) ~= "function" then
+    return n, value, leftover
+  end
+  items = items or {}
+  for i, it in ipairs(items) do
+    local reason = nil
+    if C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
+      reason = "moved"
+    elseif ns.isProtected(it.link) then
+      reason = "protected"
+    elseif not ns.slotHasValue(it.bag, it.slot) then
+      reason = "vendor won't buy"
+    end
+    if reason then
+      leftover[#leftover + 1] = { link = it.link, reason = reason }
+    else
+      local count = ns.slotCount(it.bag, it.slot)
+      local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
+      local still = false
+      if type(C_Container.GetContainerItemLink) == "function" then
+        local okLink, now = pcall(C_Container.GetContainerItemLink, it.bag, it.slot)
+        still = okLink and now == it.link
+      end
+      if ok and not still then
+        n = n + count
+        value = value + (it.price or 0) * count
+      else
+        leftover[#leftover + 1] = { link = it.link,
+          reason = (not ok) and "sell failed" or "still in bags" }
+        for j = i + 1, #items do
+          leftover[#leftover + 1] = { link = items[j].link, reason = "sale stopped" }
+        end
+        break
+      end
+    end
+  end
+  return n, value, leftover
+end
+
+-- Merged rows with true item counts: one row per link, summed stacks
+-- and vendor totals. Sale lists carry per-slot counts.
+function ns.mergeStacks(items)
+  local groups, byID = {}, {}
+  for _, it in ipairs(items or {}) do
+    local id = ns.itemID(it.link) or it.link
+    local g = byID[id]
+    if not g then
+      g = { link = it.link, qty = 0, total = 0 }
+      byID[id] = g
+      groups[#groups + 1] = g
+    end
+    local n = tonumber(it.count) or 1
+    g.qty = g.qty + n
+    g.total = g.total + (it.price or 0) * n
+  end
+  return groups
+end
+
+-- The sale itself, shared by the auto path and the confirm dialog: an
+-- itemized summary, always shown, then the visit total.
+function ns.sellConsumablesNow(items)
+  items = items or {}
+  if #items == 0 then return end
+  local n, value, leftover = ns.sellConsumableItems(items)
+  ns.reportLeftover(leftover)
+  if n > 0 then
+    ns.sellSound()
+    local what = n == 1 and "1 item" or n .. " items"
+    ns.say("sold losing consumables (" .. what
+      .. " for " .. ns.moneyString(value) .. "):")
+    for _, g in ipairs(ns.mergeStacks(items)) do print(ns.mergedLine(g)) end
+    ns.recordSale(n, value)
+  end
+end
+
+-- The confirm list: itemized lines plus a Sell All / Cancel popup.
+function ns.reportConsumables(sale)
+  if not sale or #sale == 0 then return end
+  local groups = ns.mergeStacks(sale)
+  local total, n = 0, 0
+  for _, g in ipairs(groups) do
+    total, n = total + g.total, n + g.qty
+  end
+  local what = n == 1 and "1 item" or n .. " items"
+  ns.say("losing consumables (" .. what .. "):")
+  for _, g in ipairs(groups) do print(ns.mergedLine(g)) end
+  StaticPopup_Show("VOCVENDOR_SELL_CONSUMABLES",
+    n, ns.moneyString(total), { items = sale })
+end
+
+StaticPopupDialogs["VOCVENDOR_SELL_CONSUMABLES"] = {
+  text = "Sell %d losing consumables for %s?",
+  button1 = "Sell All",
+  button2 = "Cancel",
+  OnAccept = function(_, data) ns.sellConsumablesNow(data and data.items) end,
+  timeout = 0,
+  whileDead = true,
+  hideOnEscape = true,
+}
+
+-- Live-apply for the consumable toggles: turning the feature off
+-- mid-visit withdraws its pending confirm.
+function ns.refreshConsumablePopup()
+  if ns.opts().sellConsumables then return end
+  if type(StaticPopup_Hide) == "function" then
+    pcall(StaticPopup_Hide, "VOCVENDOR_SELL_CONSUMABLES")
+  end
 end
 
 -- Deferred sale accounting: every sale in a vendor visit adds its count
@@ -483,6 +942,13 @@ function ns.onMerchantShow()
   -- Sell first: junk gold pays for the repair that follows.
   local o = ns.opts()
   if o.autoSell then ns.autoSell() end
+  if o.sellConsumables then
+    local sale = ns.collectConsumableSale()
+    if #sale > 0 then
+      if o.autoSellConsumables then ns.sellConsumablesNow(sale)
+      else ns.reportConsumables(sale) end
+    end
+  end
   if o.autoRepair then ns.repairNow() end
 end
 
@@ -1494,11 +1960,11 @@ function ns.ensureSettings()
   local category = Settings.RegisterVerticalLayoutCategory("VocVendor")
   Settings.RegisterAddOnCategory(category)
   local db = ns.opts() -- bound, defaulted table
-  local function check(key, label, tooltip)
+  local function check(key, label, tooltip, onChange)
     local s = Settings.RegisterAddOnSetting(
       category, "VocVendor_" .. key, key, db, type(defaults[key]), label, defaults[key])
     Settings.CreateCheckbox(category, s, tooltip)
-    ns.onSettingChanged(s, ns.refreshJunkButton)
+    ns.onSettingChanged(s, onChange or ns.refreshJunkButton)
   end
   check("autoSell", "Auto-sell junk",
     "Sell junk automatically on every vendor visit. Junk is what you configure below.")
@@ -1531,6 +1997,12 @@ function ns.ensureSettings()
     "Include Warbound gear in old gear. Off keeps it safe: alts can use it through the warbank.")
   check("compareAuction", "Compare auction prices",
     "Skip vendor sale when auction data says the auction house or disenchanting nets more. Needs Auctionator, TradeSkillMaster, or Oribos Exchange.")
+  check("sellConsumables", "Sell losing consumables",
+    "Keep one stack of the strongest food, flask, potion and more; the rest sells with junk. Unrecognized and special items never sell.",
+    ns.refreshConsumablePopup)
+  check("autoSellConsumables", "Auto-sell losing consumables",
+    "Sell losing consumables automatically on every vendor visit. Off shows a confirm list first.",
+    ns.refreshConsumablePopup)
   check("keepDisenchantable", "Keep disenchantable gear",
     "Enchanters only: keep gear you could disenchant out of junk sales. Off sells it with junk like any other old gear.")
   for _, e in ipairs(ns.EXPANSIONS) do
@@ -1624,6 +2096,8 @@ ns.HELP = {
   "/vv repair     repair now",
   "/vv disenchant open the disenchant list",
   "/vv destroy    delete dead expansion items (confirms each)",
+  "/vv consume    sell losing consumables",
+  "/vv protect    keep an item out of every sale",
   "/vv config     open Settings > AddOns > VocVendor",
   "/vv help       this list (/vocvendor works too)",
 }
@@ -1636,8 +2110,10 @@ end
 -- cannot be namespaced (they are declared in .luacheckrc instead).
 SLASH_VOCVENDOR1 = "/vv"
 SLASH_VOCVENDOR2 = "/vocvendor"
+---@param msg string
 SlashCmdList.VOCVENDOR = function(msg)
-  msg = strtrim(msg or ""):lower()
+  local raw = strtrim(msg or "")
+  msg = raw:lower()
   local o = ns.opts()
   if msg == "" then
     if type(MerchantFrame) ~= "table" or not MerchantFrame:IsShown() then
@@ -1669,6 +2145,23 @@ SlashCmdList.VOCVENDOR = function(msg)
     else
       ns.reportDead(dead, true)
     end
+  elseif msg == "consume" then
+    if type(MerchantFrame) ~= "table" or not MerchantFrame:IsShown() then
+      ns.say("open a vendor first")
+      return
+    end
+    local sale = ns.collectConsumableSale()
+    if #sale == 0 then
+      ns.say("nothing to sell")
+    elseif ns.opts().autoSellConsumables then
+      ns.sellConsumablesNow(sale)
+    else
+      ns.reportConsumables(sale)
+    end
+  elseif msg == "protect" then
+    ns.listProtected()
+  elseif msg:sub(1, 8) == "protect " then
+    ns.toggleProtect(raw:sub(9))
   elseif msg == "config" then
     ns.openConfig()
   else
