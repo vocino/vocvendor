@@ -65,7 +65,8 @@ Junk button makes. Old gear is weapons and armor at least the
 configured gap below everything you wear in that slot, never
 heirlooms, never profession tools (fishing poles are tools, not
 weapons, whatever is equipped), never anything in a saved equipment
-set, never anything
+set, never anything AutoGear rates above what you wear when it is
+installed (the same veto Pawn gives on retail), never anything
 Pawn flags as an upgrade when Pawn is
 installed, never BoE or Warbound unless you opt them in, and never an
 uncollected transmog appearance, toy, or pet. Check an expansion and

@@ -328,6 +328,17 @@ local function loadAddon(world)
       return {}
     end
   end
+  -- AutoGear guest: world.gearScores[link] is the tooltip-shown score.
+  -- A link without one reads as unknown, never zero.
+  if world.withAutoGear then
+    g.AutoGearReadItemInfo = function(_, _, _, _, _, link)
+      if world.gearScores[link] == nil then return nil end
+      return { link = link }
+    end
+    g.AutoGearDetermineItemScore = function(info)
+      return world.gearScores[info.link]
+    end
+  end
 
   local src = assert(io.open(mainPath, "r")):read("*a")
   local chunk
@@ -359,6 +370,7 @@ local function newWorld()
     canRepair = true, repairCost = 0, repairCan = false,
     guildRepair = false, guildCovers = true,
     merchantOpen = true, withPawn = false, pawnUpgrades = {}, canDE = false,
+    withAutoGear = false, gearScores = {},
     settingsReg = {}, settingsChecks = 0, settingsSliders = 0,
     settingCallbacks = {},
     settingsCategory = nil, savedVars = nil,
@@ -2469,6 +2481,38 @@ do
     w.printed[#w.printed - 1] == "    " .. weak .. " x1")
   check("diag repeats the block",
     w.printed[#w.printed] == "  blocked earlier: UseContainerItem")
+end
+
+-- 83. AutoGear guest: the upgrade veto always holds, and its score
+-- ranks old gear when the client gives no item level.
+do
+  local w = newWorld()
+  w.withAutoGear = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[16] = gear(w, { slot = "INVTYPE_2HWEAPON", classID = 2, level = 400 })
+  -- Higher guest score beats a higher item level: never an upgrade sale.
+  local better = gear(w, { slot = "INVTYPE_2HWEAPON", classID = 2,
+    level = 300, price = 100 })
+  w.gearScores[better] = 500
+  w.gearScores[w.equipped[16]] = 100
+  putBag(w, better)
+  check("guest upgrade never sells", ns.isOldGear(better, 30) == false)
+  check("veto holds in the sweep", #ns.collectOldGear() == 0)
+  -- No item levels at all: the score ranks with the margin.
+  w.levels[better] = nil -- client gives no item level for the candidate
+  w.gearScores[better] = 50
+  w.gearScores[w.equipped[16]] = 100
+  check("score fallback sells the clearly worse",
+    ns.isOldGear(better, 30) == true)
+  check("fallback reaches the sweep",
+    #ns.collectOldGear() == 1 and ns.collectOldGear()[1].link == better)
+  w.gearScores[better] = 95
+  check("score within margin keeps", ns.isOldGear(better, 30) == false)
+  -- No score and no ilvl: unknown keeps.
+  w.gearScores[better] = nil
+  check("no metric keeps", ns.isOldGear(better, 30) == false)
 end
 
 print("ok - " .. passed .. " checks passed")

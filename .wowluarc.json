@@ -51,6 +51,8 @@
       "strtrim",
       "PawnGetItemData",
       "PawnIsItemAnUpgrade",
+      "AutoGearReadItemInfo",
+      "AutoGearDetermineItemScore",
       "Auctionator",
       "TSM_API",
       "OEMarketInfo"

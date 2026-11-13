@@ -1365,6 +1365,69 @@ function ns.pawnSaysUpgrade(link)
   return false
 end
 
+-- AutoGear guest: the rater on clients without Pawn (Forever). Its
+-- tooltip-shown score comes from built-in stat weights there
+-- (AutoGear defaults away from Pawn on Forever), so this is the same
+-- authorship signal Pawn gives on retail: another addon is a guest
+-- (FAMILY.md principle 4), presence-gated and pcall-guarded.
+--
+-- Two jobs, both fail closed. ns.autoGearSaysUpgrade is the veto, like
+-- Pawn: never sell what the guest rates above equipped. ns.gearScore
+-- is the fallback metric for isOldGear when the client gives no item
+-- level: callers compare with ns.OLD_SCORE_MARGIN instead of the ilvl
+-- gap. A missing guest or a failed read scores nil (unknown keeps),
+-- never zero (zero is a score, and it loses).
+ns.OLD_SCORE_MARGIN = 1.1 -- sell below ~91% of equipped: ~10% worse
+
+-- The guest score for one link, or nil. Link-only on purpose, like the
+-- Pawn guest: the info reader resolves the slot itself.
+function ns.autoGearScoreLink(link)
+  if not link then return nil end
+  if type(AutoGearReadItemInfo) ~= "function" then return nil end
+  if type(AutoGearDetermineItemScore) ~= "function" then return nil end
+  local ok, info = pcall(AutoGearReadItemInfo, nil, nil, nil, nil, nil, link)
+  if not ok or type(info) ~= "table" or info.empty then return nil end
+  local okS, score = pcall(AutoGearDetermineItemScore, info)
+  if not okS or type(score) ~= "number" then return nil end
+  return score
+end
+
+-- The guest score, memoized per scan by link. Scans already memoize
+-- their collectible answers; scores ride the same table shape on
+-- scan.scores so one sweep reads each link once.
+function ns.gearScore(link, scan)
+  if not link then return nil end
+  local memo = scan and scan.scores
+  if memo and memo[link] ~= nil then return memo[link] or nil end
+  local score = ns.autoGearScoreLink(link)
+  if memo then memo[link] = score or false end
+  return score
+end
+
+-- True when the guest rates the link above anything equipped in its
+-- slot(s). Same slot walk as the ilvl rank; a strict improvement only,
+-- so sidegrades never veto.
+function ns.autoGearSaysUpgrade(link, scan)
+  local score = ns.gearScore(link, scan)
+  if not score then return false end
+  if type(C_Item) ~= "table" then return false end
+  if type(C_Item.GetItemInfoInstant) ~= "function" then return false end
+  if type(GetInventoryItemLink) ~= "function" then return false end
+  local _, _, _, equipLoc = C_Item.GetItemInfoInstant(link)
+  if not equipLoc or equipLoc == "" then return false end
+  local slots = ns.slotPairs[equipLoc] or { ns.primarySlot[equipLoc] }
+  for _, slotID in ipairs(slots) do
+    if slotID then
+      local eqLink = GetInventoryItemLink("player", slotID)
+      if eqLink then
+        local eqScore = ns.gearScore(eqLink, scan)
+        if eqScore and score > eqScore then return true end
+      end
+    end
+  end
+  return false
+end
+
 -- True when the bag item is weapons/armor gear at least `gap` item levels
 -- below everything equipped in its slot(s), passing the exclusion
 -- filters. Gear kept for disenchanting never qualifies (unless
@@ -1470,19 +1533,36 @@ function ns.isOldGear(link, gap, ignoreDE, scan)
     if canDE then return false end
   end
   if ns.pawnSaysUpgrade(link) then return false end
+  if ns.autoGearSaysUpgrade(link, scan) then return false end
   local slots = ns.slotPairs[equipLoc] or { ns.primarySlot[equipLoc] }
   local candLevel = C_Item.GetDetailedItemLevelInfo(link)
-  if not candLevel then return false end
+  -- No item level from the client: rank by the guest score instead, with
+  -- the score margin in place of the ilvl gap. No metric at all keeps.
+  local useScore = (candLevel == nil)
+  local candScore = nil
+  if useScore then
+    candScore = ns.gearScore(link, scan)
+    if not candScore then return false end
+  end
   local compared = false
   for _, slotID in ipairs(slots) do
     if slotID then
       local eqLink = GetInventoryItemLink("player", slotID)
       if eqLink then
-        local eqLevel = C_Item.GetDetailedItemLevelInfo(eqLink)
-        if eqLevel then
-          compared = true
-          -- Below the weakest equipped piece by the full gap, or keep.
-          if candLevel + gap > eqLevel then return false end
+        if useScore then
+          local eqScore = ns.gearScore(eqLink, scan)
+          if eqScore then
+            compared = true
+            -- Below the weakest equipped score past the margin, or keep.
+            if candScore * ns.OLD_SCORE_MARGIN > eqScore then return false end
+          end
+        else
+          local eqLevel = C_Item.GetDetailedItemLevelInfo(eqLink)
+          if eqLevel then
+            compared = true
+            -- Below the weakest equipped piece by the full gap, or keep.
+            if candLevel + gap > eqLevel then return false end
+          end
         end
       end
     end
@@ -1495,7 +1575,7 @@ function ns.collectOldGear()
   local out = {}
   -- Per-scan hoists: the enchanter gate is player-level, and collectible
   -- lookups repeat per item ID, so resolve and memoize once per sweep.
-  local scan = { canDE = ns.canDisenchant(), memo = {} }
+  local scan = { canDE = ns.canDisenchant(), memo = {}, scores = {} }
   for bag = 0, NUM_BAG_SLOTS do
     local slots = C_Container.GetContainerNumSlots(bag)
     for slot = 1, slots do
@@ -1612,7 +1692,7 @@ function ns.collectKeptDisenchantables()
   if not o.junkOldGear and not ns.anyExpansionChecked() then return {} end
   local gap = o.oldGearIlvlGap or 30
   local out = {}
-  local scan = { canDE = true, memo = {} }
+  local scan = { canDE = true, memo = {}, scores = {} }
   for bag = 0, NUM_BAG_SLOTS do
     local slots = C_Container.GetContainerNumSlots(bag)
     for slot = 1, slots do

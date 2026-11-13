@@ -50,6 +50,7 @@ read_globals = {
   "hooksecurefunc", "strtrim",
   -- Optional guests: Pawn upgrades never sell; Auctionator/TSM/Oribos feed auction math
   "PawnGetItemData", "PawnIsItemAnUpgrade",
+  "AutoGearReadItemInfo", "AutoGearDetermineItemScore", -- guest rater on Forever
   "Auctionator", "TSM_API", "OEMarketInfo",
 }
 
