@@ -62,12 +62,16 @@ Every change applies at once.
 Grays go through Blizzard's own junk sale, the same call the Sell
 Junk button makes. Old gear is weapons and armor at least the
 configured gap below everything you wear in that slot, never
-heirlooms, never anything in a saved equipment set, never anything
+heirlooms, never profession tools (fishing poles are tools, not
+weapons, whatever is equipped), never anything in a saved equipment
+set, never anything
 Pawn flags as an upgrade when Pawn is
 installed, never BoE or Warbound unless you opt them in, and never an
 uncollected transmog appearance, toy, or pet. Check an expansion and
 the gap no longer applies to it: every vendorable item from a checked
-expansion sells, whatever the type, with the same gates holding
+expansion sells, whatever the type, except confidently placed
+consumables, which defer to the consumable sale (winners keep their
+stack there instead), with the same gates holding
 (equipment sets, transmog and toys and pets, Pawn upgrades, live quest
 items, heirlooms, auction value). Disenchantables still divert to the
 disenchant list first for enchanters. Each

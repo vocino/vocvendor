@@ -25,6 +25,7 @@ local function loadAddon(world)
   g.NUM_BAG_SLOTS = 4
   g.Enum = {
     ItemClass = { Consumable = 0, Weapon = 2, Armor = 4 },
+    ItemWeaponSubclass = { Fishingpole = 20 },
     ItemConsumableSubclass = { Generic = 0, Potion = 1, Elixir = 2,
       Flasksphials = 3, Scroll = 4, Fooddrink = 5, Itemenhancement = 6,
       Bandage = 7, Other = 8, VantusRune = 9, UtilityCurio = 10,
@@ -390,7 +391,7 @@ local function gear(w, o)
   w.itemIDs[link] = 1000 + gearSeq
   w.slots[link] = o.slot or "INVTYPE_HEAD"
   w.classIDs[link] = o.classID or 4 -- armor
-  w.subclassIDs[link] = 0
+  w.subclassIDs[link] = o.sub or 0
   w.rarities[link] = o.rarity or 4
   w.levels[link] = o.level or 100
   w.minLevels[link] = 1
@@ -2381,6 +2382,49 @@ do
   end
   check("one stack kept across slots", #ns2.collectConsumableSale() == 0)
   check("description read once per link", calls == 1)
+end
+
+-- 81. Profession tools are never old gear, and the expansion sweep
+-- never touches confidently placed consumables.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.unitStats = { [1] = 500, [2] = 100, [4] = 100 }
+  local WSC = w.env.Enum.ItemWeaponSubclass
+  local SC = w.env.Enum.ItemConsumableSubclass
+  -- A fishing pole far below the equipped weapon: a tool, not junk.
+  w.equipped[16] = gear(w, { slot = "INVTYPE_2HWEAPON", classID = 2, level = 400 })
+  local pole = gear(w, { slot = "INVTYPE_2HWEAPON", classID = 2,
+    sub = WSC.Fishingpole, level = 10, price = 100 })
+  putBag(w, pole)
+  check("fishing pole is never old gear", ns.isOldGear(pole, 30) == false)
+  check("pole excluded from the sale", #ns.collectOldGear() == 0)
+  -- A real old weapon alongside still sells.
+  local rusty = gear(w, { slot = "INVTYPE_2HWEAPON", classID = 2, sub = 8,
+    level = 300, price = 100 })
+  putBag(w, rusty)
+  check("real old weapon still sells",
+    #ns.collectOldGear() == 1 and ns.collectOldGear()[1].link == rusty)
+  -- Classic checked: categorized food defers to the consumable sale,
+  -- uncategorized trade goods still sweep.
+  ns.opts().sellClassic = true
+  local weak = use(w, { sub = SC.Potion, price = 50, expansion = 0,
+    desc = "use: restores 20000 health." })
+  local strong = use(w, { sub = SC.Potion, price = 200, expansion = 0,
+    desc = "use: restores 90000 health." })
+  local pearls = use(w, { class = 7, sub = 0, price = 60, expansion = 0,
+    desc = "no use effect at all." })
+  putStack(w, weak, 2)
+  putStack(w, strong, 1)
+  putStack(w, pearls, 3)
+  local exp = ns.collectExpansionJunk()
+  check("expansion sweep spares categorized food",
+    #exp == 1 and exp[1].link == pearls)
+  local sale = ns.collectConsumableSale()
+  check("consumable sale still takes the loser",
+    #sale == 1 and sale[1].link == weak)
 end
 
 print("ok - " .. passed .. " checks passed")

@@ -1371,9 +1371,17 @@ function ns.checkCollectible(itemID, link)
 end
 function ns.isOldGear(link, gap, ignoreDE, scan)
   if ns.isUncollectedCollectible(link, scan and scan.memo) then return false end
-  local _, _, _, equipLoc, _, classID = C_Item.GetItemInfoInstant(link)
+  local _, _, _, equipLoc, _, classID, subClassID = C_Item.GetItemInfoInstant(link)
   if not equipLoc or equipLoc == "" then return false end
   if classID ~= Enum.ItemClass.Weapon and classID ~= Enum.ItemClass.Armor then
+    return false
+  end
+  -- Profession implements are tools, not gear: a fishing pole is never
+  -- junk by item level, whatever is equipped. (Fishingpole 20, verified
+  -- on live + forever.)
+  if classID == Enum.ItemClass.Weapon
+    and type(Enum.ItemWeaponSubclass) == "table"
+    and subClassID == Enum.ItemWeaponSubclass.Fishingpole then
     return false
   end
   local _, _, quality, _, _, _, _, _, _, _, sellPrice, _, _, bindType =
@@ -1434,7 +1442,9 @@ function ns.collectOldGear()
 end
 
 -- Expansion junk: everything the vendor buys from a checked expansion,
--- whatever the type. The check on the row is the consent, so the ilvl
+-- whatever the type, except confidently placed consumables: those belong
+-- to the consumable sale, where winners keep one stack and losers sell
+-- with a summary. The check on the row is the consent, so the ilvl
 -- gap does not apply here; every keep gate does (equipment sets,
 -- transmog/toy/pet, Pawn upgrades, live quest items, heirlooms), and
 -- disenchantables divert to the disenchant list first unless ignoreDE.
@@ -1443,6 +1453,7 @@ function ns.isExpansionJunk(link, bag, slot, ignoreDE, scan)
   if id == nil or not ns.expansionChecked(id) then return false end
   if ns.inEquipmentSet(bag, slot) then return false end
   if not ns.slotHasValue(bag, slot) then return false end
+  if ns.consumableCategory(link, scan and scan.descs) ~= nil then return false end
   if ns.isUncollectedCollectible(link, scan and scan.memo) then return false end
   local _, _, quality, _, _, _, _, _, _, _, sellPrice = C_Item.GetItemInfo(link)
   if not quality then return false end
@@ -1460,7 +1471,7 @@ end
 
 function ns.collectExpansionJunk()
   local out = {}
-  local scan = { canDE = ns.canDisenchant(), memo = {} }
+  local scan = { canDE = ns.canDisenchant(), memo = {}, descs = {} }
   for bag = 0, NUM_BAG_SLOTS do
     local slots = C_Container.GetContainerNumSlots(bag)
     for slot = 1, slots do
