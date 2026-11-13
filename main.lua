@@ -1478,7 +1478,14 @@ function ns.reportDead(dead, chatAlways)
   end
 end
 
--- Settings
+-- Settings. Every setting carries a value-changed callback (FAMILY.md
+-- "Settings"): the definition reads live on every event, and a change
+-- mid-visit re-evaluates the merchant button at once.
+function ns.onSettingChanged(setting, fn)
+  if setting and type(setting.SetValueChangedCallback) == "function" then
+    setting:SetValueChangedCallback(fn)
+  end
+end
 ns.settingsBuilt = false
 function ns.ensureSettings()
   if ns.settingsBuilt then return end
@@ -1491,6 +1498,7 @@ function ns.ensureSettings()
     local s = Settings.RegisterAddOnSetting(
       category, "VocVendor_" .. key, key, db, type(defaults[key]), label, defaults[key])
     Settings.CreateCheckbox(category, s, tooltip)
+    ns.onSettingChanged(s, ns.refreshJunkButton)
   end
   check("autoSell", "Auto-sell junk",
     "Sell junk automatically on every vendor visit. Junk is what you configure below.")
@@ -1515,6 +1523,7 @@ function ns.ensureSettings()
     end
     Settings.CreateSlider(category, s, sliderOpts,
       "Gear this far below your equipped item level counts as old gear.")
+    ns.onSettingChanged(s, ns.refreshJunkButton)
   end
   check("oldGearBoE", "Also sell Bind on Equip",
     "Include BoE gear in old gear. Off keeps it safe: BoE can sell well on the auction house.")
@@ -1541,11 +1550,14 @@ end
 
 -- Addon compartment (FAMILY.md "Addon compartment"): the toc names
 -- these three globals; Blizzard's compartment menu calls them with
--- (addonName, button). The click opens the disenchant list while kept
--- gear waits, settings otherwise; hover follows the tooltip contract:
--- gold title, one line, the slash hint. Clients without the
--- compartment ignore the metadata.
-function VocVendor_CompartmentClick()
+-- (addonName, button). Left opens the disenchant list while kept gear
+-- waits, settings otherwise; right always opens Settings; any click in
+-- combat no-ops. Hover follows the tooltip contract: gold title, one
+-- line, the slash hint. Clients without the compartment ignore the
+-- metadata.
+function VocVendor_CompartmentClick(_, button)
+  if type(InCombatLockdown) == "function" and InCombatLockdown() then return end
+  if button == "RightButton" then ns.openConfig() return end
   local kept = ns.collectKeptDisenchantables()
   if #kept > 0 and ns.refreshDEWindow(kept) then return end
   local dead = ns.collectDeadItems()
@@ -1556,6 +1568,7 @@ end
 function VocVendor_CompartmentEnter(_, button)
   if type(GameTooltip) ~= "table" then return end
   GameTooltip:SetOwner(button, "ANCHOR_LEFT")
+  GameTooltip:ClearLines()
   GameTooltip:SetText("VocVendor", COLORS.gold[1], COLORS.gold[2], COLORS.gold[3])
   GameTooltip:AddLine("Sells junk and repairs on every vendor visit. Junk is what you define.",
     COLORS.text[1], COLORS.text[2], COLORS.text[3], true)

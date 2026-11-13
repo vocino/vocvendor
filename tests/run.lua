@@ -258,6 +258,7 @@ local function loadAddon(world)
   end
   g.GameTooltip = {
     SetOwner = function(_, owner, anchor) world.gametip.owner, world.gametip.anchor = owner, anchor end,
+    ClearLines = function() world.gametip.lines = {} end,
     SetText = function(_, t, r, gg, b) world.gametip.title = t world.gametip.titleColor = { r, gg, b } end,
     AddLine = function(_, t) world.gametip.lines[#world.gametip.lines + 1] = t end,
     Show = function() world.gametip.shown = true end,
@@ -283,7 +284,8 @@ local function loadAddon(world)
     RegisterAddOnCategory = function() end,
     RegisterAddOnSetting = function(_, var, key, _, _, label, default)
       world.settingsReg[var] = { key = key, label = label, default = default }
-      return { var = var, SetValueChangedCallback = function() end }
+      return { var = var,
+        SetValueChangedCallback = function(_, fn) world.settingCallbacks[var] = fn end }
     end,
     CreateCheckbox = function() world.settingsChecks = world.settingsChecks + 1 end,
     CreateSliderOptions = function(min, max, step)
@@ -334,6 +336,7 @@ local function newWorld()
     guildRepair = false, guildCovers = true,
     merchantOpen = true, withPawn = false, pawnUpgrades = {}, canDE = false,
     settingsReg = {}, settingsChecks = 0, settingsSliders = 0,
+    settingCallbacks = {},
     settingsCategory = nil, savedVars = nil,
     blizzClicked = false, hookedClick = {}, hooks = {}, buttonEnabled = nil,
     playedSounds = {}, noValues = {},
@@ -1938,6 +1941,69 @@ do
   check("chat names the dead pile",
     w.printed[1] == "|cff66ccffVocVendor|r: dead items the vendor won't buy (1 item):")
   check("chat lists the link", w.printed[2] == "  " .. ap)
+end
+
+-- 71. Every setting carries a value-changed callback (FAMILY.md
+-- "Settings"), and a definition change re-evaluates the merchant
+-- button mid-visit.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local have, want = 0, 0
+  for _ in pairs(w.settingCallbacks) do have = have + 1 end
+  for _ in pairs(w.settingsReg) do want = want + 1 end
+  check("every setting has a callback", have == want and want > 0)
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300 }))
+  w.junkCount = 0
+  ns.hookJunkButton()
+  ns.refreshJunkButton()
+  check("no grays, no opt-in: button off", w.buttonEnabled == false)
+  ns.opts().junkOldGear = true -- the panel writes the table live
+  w.settingCallbacks["VocVendor_junkOldGear"]()
+  check("callback re-enables the button", w.buttonEnabled == true)
+end
+
+-- 72. Compartment click no-ops in combat; hover clears before painting
+-- so repeated hovers never stack lines.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local opened = nil
+  w.env.Settings.OpenToCategory = function(id) opened = id end
+  w.combat = true
+  w.env.VocVendor_CompartmentClick("VocVendor", "LeftButton")
+  check("combat click opens nothing", opened == nil)
+  check("combat click says nothing", #w.printed == 0)
+  check("combat click opens no window", ns.deWindow == nil and ns.deadWindow == nil)
+  w.combat = false
+  local btn = {}
+  w.env.VocVendor_CompartmentEnter("VocVendor", btn)
+  w.env.VocVendor_CompartmentEnter("VocVendor", btn)
+  check("hover never stacks lines", #w.gametip.lines == 2)
+end
+
+-- 73. Right-click always opens Settings, even while kept gear waits;
+-- left still opens the disenchant list first.
+do
+  local w = newWorld()
+  w.canDE = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  local opened = nil
+  w.env.Settings.OpenToCategory = function(id) opened = id end
+  w.env.VocVendor_CompartmentClick("VocVendor", "RightButton")
+  check("right-click opens settings", opened ~= nil)
+  check("right-click says nothing", #w.printed == 0)
+  check("right-click opens no window", ns.deWindow == nil and ns.deadWindow == nil)
+  w.env.VocVendor_CompartmentClick("VocVendor", "LeftButton")
+  check("left opens the disenchant list",
+    ns.deWindow ~= nil and ns.deWindow:IsShown())
 end
 
 print("ok - " .. passed .. " checks passed")
