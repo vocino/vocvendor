@@ -1572,12 +1572,21 @@ function ns.checkCollectible(itemID, link)
   end
   return false
 end
-function ns.isOldGear(link, gap, ignoreDE, scan)
-  if ns.isUncollectedCollectible(link, scan and scan.memo) then return false end
-  local _, _, _, equipLoc, _, classID, subClassID = C_Item.GetItemInfoInstant(link)
-  if not equipLoc or equipLoc == "" then return false end
-  if classID ~= Enum.ItemClass.Weapon and classID ~= Enum.ItemClass.Armor then
+-- The `why` table is the audit readout (/vv why): when given, the
+-- first failing gate names itself in why.reason instead of silently
+-- keeping, so a bag that never sells explains itself in one chat line.
+function ns.isOldGear(link, gap, ignoreDE, scan, why)
+  local function stop(reason)
+    if why then why.reason = reason end
     return false
+  end
+  if ns.isUncollectedCollectible(link, scan and scan.memo) then
+    return stop("uncollected appearance, toy, or pet")
+  end
+  local _, _, _, equipLoc, _, classID, subClassID = C_Item.GetItemInfoInstant(link)
+  if not equipLoc or equipLoc == "" then return stop("not equipment") end
+  if classID ~= Enum.ItemClass.Weapon and classID ~= Enum.ItemClass.Armor then
+    return stop("not weapon or armor")
   end
   -- Profession implements are tools, not gear: a fishing pole is never
   -- junk by item level, whatever is equipped. (Fishingpole 20, verified
@@ -1585,24 +1594,30 @@ function ns.isOldGear(link, gap, ignoreDE, scan)
   if classID == Enum.ItemClass.Weapon
     and type(Enum.ItemWeaponSubclass) == "table"
     and subClassID == Enum.ItemWeaponSubclass.Fishingpole then
-    return false
+    return stop("profession tool")
   end
   local _, _, quality, _, _, _, _, _, _, _, sellPrice, _, _, bindType =
     C_Item.GetItemInfo(link)
-  if not quality then return false end
-  if quality == Enum.ItemQuality.Heirloom then return false end
-  if not sellPrice or sellPrice == 0 then return false end
+  if not quality then return stop("unknown item") end
+  if quality == Enum.ItemQuality.Heirloom then return stop("heirloom") end
+  if not sellPrice or sellPrice == 0 then return stop("vendor won't buy") end
   local o = ns.opts()
-  if bindType == Enum.ItemBind.OnEquip and not o.oldGearBoE then return false end
-  if ns.isWarbound(link) and not o.oldGearWarbound then return false end
+  if bindType == Enum.ItemBind.OnEquip and not o.oldGearBoE then
+    return stop("Bind on Equip (off)")
+  end
+  if ns.isWarbound(link) and not o.oldGearWarbound then
+    return stop("Warbound (off)")
+  end
   if not ignoreDE and o.keepDisenchantable and ns.isDisenchantable(link) then
     -- canDE is the per-scan hoist; nil resolves live for direct calls.
     local canDE = scan and scan.canDE
     if canDE == nil then canDE = ns.canDisenchant() end
-    if canDE then return false end
+    if canDE then return stop("kept for disenchanting") end
   end
-  if ns.pawnSaysUpgrade(link) then return false end
-  if ns.autoGearSaysUpgrade(link, scan) then return false end
+  if ns.pawnSaysUpgrade(link) then return stop("Pawn rates it an upgrade") end
+  if ns.autoGearSaysUpgrade(link, scan) then
+    return stop("AutoGear rates it an upgrade")
+  end
   local slots = ns.slotPairs[equipLoc] or { ns.primarySlot[equipLoc] }
   local candLevel = C_Item.GetDetailedItemLevelInfo(link)
   -- No item level from the client: rank by the guest score instead, with
@@ -1611,9 +1626,9 @@ function ns.isOldGear(link, gap, ignoreDE, scan)
   local candScore = nil
   if useScore then
     candScore = ns.gearScore(link, scan)
-    if not candScore then return false end
+    if not candScore then return stop("no AutoGear score") end
   end
-  local compared = false
+  local compared, best = false, 0
   for _, slotID in ipairs(slots) do
     if slotID then
       local eqLink = GetInventoryItemLink("player", slotID)
@@ -1622,21 +1637,63 @@ function ns.isOldGear(link, gap, ignoreDE, scan)
           local eqScore = ns.gearScore(eqLink, scan)
           if eqScore then
             compared = true
+            if eqScore > best then best = eqScore end
             -- Below the weakest equipped score past the margin, or keep.
-            if candScore * ns.OLD_SCORE_MARGIN > eqScore then return false end
+            if candScore * ns.OLD_SCORE_MARGIN > eqScore then
+              return stop("score within 10% of equipped")
+            end
           end
         else
           local eqLevel = C_Item.GetDetailedItemLevelInfo(eqLink)
           if eqLevel then
             compared = true
+            if eqLevel > best then best = eqLevel end
             -- Below the weakest equipped piece by the full gap, or keep.
-            if candLevel + gap > eqLevel then return false end
+            if candLevel + gap > eqLevel then
+              return stop("within " .. gap .. " ilvls of " .. eqLevel .. " equipped")
+            end
           end
         end
       end
     end
   end
-  return compared
+  if not compared then return stop("nothing equipped to compare") end
+  if why then
+    why.reason = "sells: " .. (useScore
+      and ("score " .. candScore .. " vs " .. best .. " equipped")
+      or ("ilvl " .. candLevel .. ", " .. gap .. " below " .. best .. " equipped"))
+  end
+  return true
+end
+
+-- Diagnose the old-gear definition over the bags: one line per
+-- weapon/armor piece naming the verdict, so a bag that never sells
+-- explains itself instead of staying silent.
+function ns.diagOldGear()
+  local gap = ns.opts().oldGearIlvlGap or 30
+  local scan = { canDE = ns.canDisenchant(), memo = {}, scores = {} }
+  local lines = {}
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      local link = C_Container.GetContainerItemLink(bag, slot)
+      if link then
+        local _, _, _, equipLoc, _, classID = C_Item.GetItemInfoInstant(link)
+        if equipLoc and equipLoc ~= ""
+          and (classID == Enum.ItemClass.Weapon or classID == Enum.ItemClass.Armor) then
+          local why = {}
+          ns.isOldGear(link, gap, nil, scan, why)
+          lines[#lines + 1] = (why.reason or "keeps") .. ": " .. tostring(link)
+        end
+      end
+    end
+  end
+  if #lines == 0 then
+    ns.say("no gear in bags")
+  else
+    ns.play("open") -- the verdicts are the readout
+    for _, line in ipairs(lines) do ns.say(line) end
+  end
 end
 
 function ns.collectOldGear()
@@ -2406,6 +2463,7 @@ ns.HELP = {
   "/vv consume       sell losing consumables",
   "/vv protect       keep an item out of every sale",
   "/vv diag          show consumable ranks",
+  "/vv why           explain each gear verdict",
   "/vv dismiss-new   clear all New tags",
   "/vv config        open Settings > AddOns > VocVendor",
   "/vv help          this list (/vocvendor works too)",
@@ -2473,6 +2531,8 @@ SlashCmdList.VOCVENDOR = function(msg)
     ns.toggleProtect(raw:sub(9))
   elseif msg == "diag" then
     ns.diagConsumables()
+  elseif msg == "why" then
+    ns.diagOldGear()
   elseif msg == "dismiss-new" then
     ns.dismissNew()
   elseif msg == "config" then

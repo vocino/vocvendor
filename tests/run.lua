@@ -2744,4 +2744,87 @@ do
     and d.gametip.colors[1][1] == 1)
 end
 
+-- 90. Full vendor visit with the AutoGear guest: lower-rated gear sells.
+do
+  local w = newWorld()
+  w.withAutoGear = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  w.gearScores[w.equipped[1]] = 500
+  local low = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  w.gearScores[low] = 100
+  putBag(w, low)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("lower-rated guest gear sells", #w.sold == 1)
+end
+
+-- 91. No item level, zero guest score: zero is a score, and it loses.
+-- (Forever gear with no ilvl whose AutoGear score is 0 must sell once
+-- the equipped piece scores higher; the memo must not reread 0 as
+-- unknown on the fallback pass.)
+do
+  local w = newWorld()
+  w.withAutoGear = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  w.gearScores[w.equipped[1]] = 500
+  local low = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  w.levels[low] = nil -- the client gives no item level (Forever)
+  w.levels[w.equipped[1]] = nil
+  w.gearScores[low] = 0
+  putBag(w, low)
+  check("zero scores, not unknown", ns.gearScore(low, { scores = {} }) == 0)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("zero-scored gear sells", #w.sold == 1)
+end
+
+-- 92. /vv why names the verdict per gear piece.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local old = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  local boe = gear(w, { slot = "INVTYPE_HEAD", level = 200, price = 1000,
+    bindType = 2 })
+  local near = gear(w, { slot = "INVTYPE_HEAD", level = 390, price = 1000 })
+  putBag(w, old)
+  putBag(w, boe)
+  putBag(w, near)
+  w.env.SlashCmdList.VOCVENDOR("why")
+  check("why confirms open", w.playedSounds[1] == 850)
+  check("sells verdict",
+    w.printed[1] == "|cff66ccffVocVendor|r: sells: ilvl 300, 30 below 400 equipped: " .. old)
+  check("boe verdict",
+    w.printed[2] == "|cff66ccffVocVendor|r: Bind on Equip (off): " .. boe)
+  check("gap verdict",
+    w.printed[3] == "|cff66ccffVocVendor|r: within 30 ilvls of 400 equipped: " .. near)
+  -- No item level and no guest score: the verdict says so.
+  local v = newWorld()
+  local nsv = loadAddon(v)
+  clientLoaded(v)
+  v.equipped[1] = gear(v, { slot = "INVTYPE_HEAD", level = 400 })
+  local unranked = gear(v, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  v.levels[unranked] = nil
+  v.levels[v.equipped[1]] = nil
+  putBag(v, unranked)
+  v.env.SlashCmdList.VOCVENDOR("why")
+  check("missing score verdict",
+    v.printed[1] == "|cff66ccffVocVendor|r: no AutoGear score: " .. unranked)
+  -- Empty bags answer instead of staying silent.
+  local e = newWorld()
+  local nse = loadAddon(e)
+  clientLoaded(e)
+  nse.diagOldGear()
+  check("no gear answers",
+    #e.playedSounds == 0
+    and e.printed[1] == "|cff66ccffVocVendor|r: no gear in bags")
+end
+
 print("ok - " .. passed .. " checks passed")

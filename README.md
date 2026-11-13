@@ -34,6 +34,7 @@ while kept gear waits.
 /vv consume       sell losing consumables
 /vv protect       keep an item out of every sale
 /vv diag          show consumable ranks
+/vv why           explain each gear verdict
 /vv dismiss-new   clear all New tags
 /vv config        open Settings > AddOns > VocVendor
 /vv help          this list (/vocvendor works too)
