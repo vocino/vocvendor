@@ -2214,7 +2214,7 @@ end
 -- visit ends with at most one winner stack per category.
 do
   local w = newWorld()
-  local ns = loadAddon(w)
+  loadAddon(w)
   clientLoaded(w)
   w.unitStats = { [1] = 500, [2] = 100, [4] = 100 }
   local SC = w.env.Enum.ItemConsumableSubclass
