@@ -179,9 +179,10 @@ function ns.opts()
     end
   end
   -- The slider's own range (Settings panel), enforced here too so a
-  -- hand-edited gap can never make everything (or nothing) "old gear".
+  -- hand-edited gap stays on it. A gap of 1 sells anything strictly
+  -- worse than equipped (sidegrades keep); larger gaps keep more.
   local gap = ns.db.oldGearIlvlGap
-  if not (gap >= 10 and gap <= 100) then ns.db.oldGearIlvlGap = defaults.oldGearIlvlGap end
+  if not (gap >= 1 and gap <= 100) then ns.db.oldGearIlvlGap = defaults.oldGearIlvlGap end
   return ns.db
 end
 
@@ -1443,10 +1444,12 @@ end
 -- Two jobs, both fail closed. ns.autoGearSaysUpgrade is the veto, like
 -- Pawn: never sell what the guest rates above equipped. ns.gearScore
 -- is the fallback metric for isOldGear when the client gives no item
--- level: callers compare with ns.OLD_SCORE_MARGIN instead of the ilvl
--- gap. A missing guest or a failed read scores nil (unknown keeps),
--- never zero (zero is a score, and it loses).
-ns.OLD_SCORE_MARGIN = 1.1 -- sell below ~91% of equipped: ~10% worse
+-- level: callers sell on a strictly lower score, like a gap of 1 on
+-- ilvl clients. A missing guest or a failed read scores nil (unknown
+-- keeps), never zero (zero is a score, and it loses). Ties keep: an
+-- unscored epsilon tie is not proven worse.
+-- (No margin cushion: while questing, replacements land a few points
+-- below equipped, and a cushion keeps every one of them.)
 
 -- The guest score for one link, or nil. Link-only on purpose, like the
 -- Pawn guest: the info reader resolves the slot itself.
@@ -1638,9 +1641,9 @@ function ns.isOldGear(link, gap, ignoreDE, scan, why)
           if eqScore then
             compared = true
             if eqScore > best then best = eqScore end
-            -- Below the weakest equipped score past the margin, or keep.
-            if candScore * ns.OLD_SCORE_MARGIN > eqScore then
-              return stop("score within 10% of equipped")
+            -- Below the weakest equipped score, or keep.
+            if candScore >= eqScore then
+              return stop("score " .. candScore .. " vs " .. eqScore .. " equipped")
             end
           end
         else
@@ -2327,7 +2330,7 @@ function ns.ensureSettings()
     local s = Settings.RegisterAddOnSetting(
       category, "VocVendor_oldGearIlvlGap", "oldGearIlvlGap",
       db, type(defaults.oldGearIlvlGap), newLabel("Old gear ilvl gap", "oldGearIlvlGap"), defaults.oldGearIlvlGap)
-    local sliderOpts = Settings.CreateSliderOptions(10, 100, 5)
+    local sliderOpts = Settings.CreateSliderOptions(1, 100, 1)
     local rightLabel = MinimalSliderWithSteppersMixin
       and MinimalSliderWithSteppersMixin.Label
       and MinimalSliderWithSteppersMixin.Label.Right

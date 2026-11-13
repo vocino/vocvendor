@@ -49,7 +49,7 @@ Settings > AddOns > VocVendor, or `/vv config`:
 - Guild funds first (default on)
 - Chat announcements (default on)
 - Old gear counts as junk (default off)
-- Old gear ilvl gap (10-100 in 5s, default 30)
+- Old gear ilvl gap (1-100, default 30: 1 sells anything worse than equipped)
 - Also sell Bind on Equip (default off: BoE can sell on the auction house)
 - Also sell Warbound (default off: alts can use it through the warbank)
 - Compare auction prices (default on: with Auctionator, TradeSkillMaster, or Oribos Exchange installed, gear worth more on the auction house is held back with its reason instead of sold)

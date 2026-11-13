@@ -510,8 +510,10 @@ do
   clientLoaded(w)
   ns.db.oldGearIlvlGap = 5000
   check("gap above slider range reset", ns.opts().oldGearIlvlGap == 30)
-  ns.db.oldGearIlvlGap = 1
+  ns.db.oldGearIlvlGap = 0
   check("gap below slider range reset", ns.opts().oldGearIlvlGap == 30)
+  ns.db.oldGearIlvlGap = 1
+  check("gap of 1 sells anything worse", ns.opts().oldGearIlvlGap == 1)
   ns.db.oldGearIlvlGap = 45
   check("gap inside slider range kept", ns.opts().oldGearIlvlGap == 45)
 end
@@ -2527,7 +2529,9 @@ do
   putBag(w, better)
   check("guest upgrade never sells", ns.isOldGear(better, 30) == false)
   check("veto holds in the sweep", #ns.collectOldGear() == 0)
-  -- No item levels at all: the score ranks with the margin.
+  -- No item levels at all: the score ranks strictly, like a gap of 1.
+  -- (No cushion: while questing, replacements land a few points below
+  -- equipped, and a cushion keeps every one of them.)
   w.levels[better] = nil -- client gives no item level for the candidate
   w.gearScores[better] = 50
   w.gearScores[w.equipped[16]] = 100
@@ -2536,7 +2540,10 @@ do
   check("fallback reaches the sweep",
     #ns.collectOldGear() == 1 and ns.collectOldGear()[1].link == better)
   w.gearScores[better] = 95
-  check("score within margin keeps", ns.isOldGear(better, 30) == false)
+  check("score slightly worse sells",
+    ns.isOldGear(better, 30) == true)
+  w.gearScores[better] = 100
+  check("score tie keeps", ns.isOldGear(better, 30) == false)
   -- No score and no ilvl: unknown keeps.
   w.gearScores[better] = nil
   check("no metric keeps", ns.isOldGear(better, 30) == false)
