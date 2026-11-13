@@ -2,15 +2,15 @@
 
 ## Code Map
 
-- `main.lua`: the whole addon: the junk definition, auto-sell,
-  auto-repair, the native Sell Junk hook, the disenchant window,
-  Settings panel, slash
+- `main.lua`: the whole addon: the junk definition (grays, old gear, per-expansion checklist, delete list), auto-sell, auto-repair, the native Sell Junk hook, auction/disenchant compare, the disenchant and delete windows, Settings panel, slash, compartment
 - `VocVendor.toc` / `VocVendor_Camelot.toc`: addon metadata (dual toc,
   shared `main.lua`; no `RequiredDeps`)
 - `tests/run.lua`: stub-harness regression tests (`lua tests/run.lua`)
 - `FAMILY.md`: conventions shared by every Voc addon
 - `VERSIONING.md`: tag-driven semver releases (identical across the family)
 - `.luacheckrc`: lint config declaring the addon's globals
+- `.reference/api-verification.md`: per-API verification record (gitignored)
+- `.reference/`: local analysis checkouts, never packaged or committed
 - `.github`: `test.yml` (tests + lint + skill checks), `release.yml` (packager), `tag.yml` (cut a tag from anywhere)
 
 ## API references
