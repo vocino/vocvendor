@@ -6,8 +6,7 @@
 - `VocVendor.toc` / `VocVendor_Camelot.toc`: addon metadata (dual toc,
   shared `main.lua`; no `RequiredDeps`)
 - `tests/run.lua`: stub-harness regression tests (`lua tests/run.lua`)
-- `FAMILY.md`: conventions shared by every Voc addon
-- `VERSIONING.md`: tag-driven semver releases (identical across the family)
+- Family contract: canonical in the `voc-addons` skill (`family/FAMILY.md`, `family/VERSIONING.md`)
 - `.luacheckrc`: lint config declaring the addon's globals
 - `.reference/api-verification.md`: per-API verification record (gitignored)
 - `.reference/`: local analysis checkouts, never packaged or committed
@@ -41,8 +40,7 @@ local-checkout recipe: `FAMILY.md`, Sources of truth.
 ## Family
 
 VocVendor is one of the Voc addons. Naming, slash grammar, chat voice,
-sounds, palette, settings, layout, and docs follow `FAMILY.md`; that file is identical
-in every sibling repo, so edit it everywhere or not at all.
+sounds, palette, settings, layout, and docs follow the family contract, canonical in the `voc-addons` skill (`family/FAMILY.md`).
 Debugging follows `FAMILY.md` "Debugging": !BugGrabber +
 BugSack, errors read from `!BugGrabber.lua` after `/reload`.
 Craft follows the `voc-addons` skill, the source of truth for how Voc
@@ -70,7 +68,7 @@ std, which the archived 0.23.0 line does not know.
 
 ## Releases
 
-Follow `VERSIONING.md` when cutting a release; never retag.
+Follow the release flow in the `voc-addons` skill (`family/VERSIONING.md`); never retag.
 
 ## Live testing
 
