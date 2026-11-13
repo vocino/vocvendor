@@ -2338,7 +2338,7 @@ function ns.ensureSettings()
       sliderOpts:SetLabelFormatter(rightLabel)
     end
     local gapInit = Settings.CreateSlider(category, s, sliderOpts,
-      "Gear this far below your equipped item level counts as old gear.")
+      "Gear this far below your equipped item level counts as old gear. Where the client reports no item levels, old gear sells on a strictly lower guest score instead.")
     ns.onSettingChanged(s, ns.refreshJunkButton)
     gateChild(gapInit, junkInit, "junkOldGear")
   end

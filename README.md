@@ -69,7 +69,9 @@ a new sale category stays off until you check it.
 
 Grays go through Blizzard's own junk sale, the same call the Sell
 Junk button makes. Old gear is weapons and armor at least the
-configured gap below everything you wear in that slot, never
+configured gap below everything you wear in that slot (on clients
+that report no item levels, anything the guest scores strictly lower
+sells instead), never
 heirlooms, never profession tools (fishing poles are tools, not
 weapons, whatever is equipped), never anything in a saved equipment
 set, never anything AutoGear rates above what you wear when it is
