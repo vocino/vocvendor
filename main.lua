@@ -256,20 +256,26 @@ end
 
 -- The item's Use-spell description, lowercased for keyword matching, or
 -- nil when the client cannot say. Presence-gated and pcall-guarded: an
--- unknown spell keeps the item, never sells it.
-function ns.consumableDesc(link)
+-- unknown spell keeps the item, never sells it. The optional memo shares
+-- one spell read between the category and power passes of a scan.
+function ns.consumableDesc(link, memo)
+  if memo and memo[link] ~= nil then return memo[link] or nil end
+  local function done(desc)
+    if memo then memo[link] = desc or false end
+    return desc
+  end
   if type(C_Item) ~= "table" or type(C_Item.GetItemSpell) ~= "function" then
-    return nil
+    return done(nil)
   end
   local ok, _, spellID = pcall(C_Item.GetItemSpell, link)
-  if not ok or type(spellID) ~= "number" then return nil end
+  if not ok or type(spellID) ~= "number" then return done(nil) end
   if type(C_Spell) ~= "table"
     or type(C_Spell.GetSpellDescription) ~= "function" then
-    return nil
+    return done(nil)
   end
   local okD, desc = pcall(C_Spell.GetSpellDescription, spellID)
-  if not okD or type(desc) ~= "string" or desc == "" then return nil end
-  return desc:lower()
+  if not okD or type(desc) ~= "string" or desc == "" then return done(nil) end
+  return done(desc:lower())
 end
 
 function ns.isSpecialConsumable(desc)
@@ -313,7 +319,7 @@ end
 -- The buff slot for a consumable link, or nil when the addon cannot
 -- confidently place it. Never invents a category: subclass first, then
 -- the spell description refines it, and anything ambiguous keeps.
-function ns.consumableCategory(link)
+function ns.consumableCategory(link, memo)
   if type(C_Item) ~= "table" or type(C_Item.GetItemInfo) ~= "function" then
     return nil
   end
@@ -328,7 +334,7 @@ function ns.consumableCategory(link)
   if sub == SC.Bandage then return "bandage" end
   if sub == SC.Scroll then return "scroll" end
   if sub == SC.Itemenhancement or sub == SC.ItemenhancementTemporary then
-    local desc = ns.consumableDesc(link)
+    local desc = ns.consumableDesc(link, memo)
     if not desc or ns.isSpecialConsumable(desc) then return nil end
     if hasAny(desc, ns.OFFENSE_WORDS) or hasAny(desc, ns.DEFENSE_WORDS) then
       return "weapon"
@@ -336,7 +342,7 @@ function ns.consumableCategory(link)
     return nil
   end
   if sub == SC.Draught or sub == SC.VantusRune then
-    local desc = ns.consumableDesc(link)
+    local desc = ns.consumableDesc(link, memo)
     if not desc or ns.isSpecialConsumable(desc) then return nil end
     if hasAny(desc, ns.OFFENSE_WORDS) or hasAny(desc, ns.DEFENSE_WORDS) then
       return "utility"
@@ -344,7 +350,7 @@ function ns.consumableCategory(link)
     return nil
   end
   if sub == SC.Elixir or sub == SC.Fooddrink or sub == SC.Potion then
-    local desc = ns.consumableDesc(link)
+    local desc = ns.consumableDesc(link, memo)
     if not desc or ns.isSpecialConsumable(desc) then return nil end
     if sub == SC.Potion then return ns.potionCategory(desc) end
     if sub == SC.Elixir then
@@ -407,8 +413,8 @@ end
 -- Rankable power for a consumable, or nil when the client cannot say.
 -- Identical items are always comparable; different items need a parsed
 -- number on the winning side (see collectConsumableSale).
-function ns.consumablePower(link)
-  local desc = ns.consumableDesc(link)
+function ns.consumablePower(link, memo)
+  local desc = ns.consumableDesc(link, memo)
   if not desc then return nil end
   local id = ns.itemID(link)
   local ilvl = 0
@@ -519,7 +525,8 @@ end
 -- (no spell data) and unplaced ones never appear here.
 function ns.collectConsumableSale()
   if not ns.opts().sellConsumables then return {} end
-  local memo = {}
+  local memo = {} -- collectible answers, per item ID
+  local descs = {} -- spell descriptions, per link: one read per scan
   local byCat, order = {}, {}
   for bag = 0, NUM_BAG_SLOTS do
     local slots = C_Container.GetContainerNumSlots(bag)
@@ -530,7 +537,7 @@ function ns.collectConsumableSale()
         and not ns.isUncollectedCollectible(link, memo) then
         local _, _, _, _, _, _, _, _, _, _, sellPrice = C_Item.GetItemInfo(link)
         if sellPrice and sellPrice > 0 then
-          local cat = ns.consumableCategory(link)
+          local cat = ns.consumableCategory(link, descs)
           if cat then
             if not byCat[cat] then
               byCat[cat] = {}
@@ -549,7 +556,7 @@ function ns.collectConsumableSale()
     local items = byCat[cat]
     local ranked = {}
     for _, it in ipairs(items) do
-      local p = ns.consumablePower(it.link)
+      local p = ns.consumablePower(it.link, descs)
       if p then
         it.power = p
         ranked[#ranked + 1] = it

@@ -2336,4 +2336,51 @@ do
   check("nothing unguarded sells", #sale == 0)
 end
 
+-- 80. New-API gaps degrade to keep, never error, and one scan reads
+-- each spell description once.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local flask = use(w, { sub = SC.Flasksphials, price = 50,
+    desc = "use: increases strength by 300." })
+  putStack(w, flask, 1)
+  local spellFn = w.env.C_Item.GetItemSpell
+  w.env.C_Item.GetItemSpell = nil -- client without the lookup
+  check("no spell API keeps", #ns.collectConsumableSale() == 0
+    and ns.consumableCategory(flask) == "flask" -- placed, but unranked
+    and ns.consumablePower(flask) == nil)
+  w.env.C_Item.GetItemSpell = spellFn
+  local descFn = w.env.C_Spell.GetSpellDescription
+  w.env.C_Spell.GetSpellDescription = nil -- data not loaded yet
+  check("no description keeps", #ns.collectConsumableSale() == 0)
+  w.env.C_Spell.GetSpellDescription = descFn
+  w.env.UnitStat = nil -- client without the tiebreak stat
+  check("no stat API reads no preference", ns.playerStatWord() == nil)
+  check("ranking still works without it",
+    ns.consumableBetter(ns.consumablePower(flask),
+      { num = 1, ilvl = 0, id = 0, desc = "" }) == true)
+  w.env.UnitStat = function(_, i) return (w.unitStats or {})[i] end
+  w.env.canaccessvalue = nil -- older client: everything accessible
+  w.unitStats = { [1] = 500, [2] = 100, [4] = 100 }
+  check("no secret API still tiebreaks",
+    ns.playerStatWord() == "strength")
+  -- One flask across three slots, one scan: one description read.
+  local w2 = newWorld()
+  local ns2 = loadAddon(w2)
+  clientLoaded(w2)
+  local one = use(w2, { sub = SC.Flasksphials, price = 50, max = 20,
+    desc = "use: increases strength by 300." })
+  for i = 1, 3 do putStack(w2, one, 1) end
+  local calls = 0
+  local baseDesc = w2.env.C_Spell.GetSpellDescription
+  w2.env.C_Spell.GetSpellDescription = function(id)
+    calls = calls + 1
+    return baseDesc(id)
+  end
+  check("one stack kept across slots", #ns2.collectConsumableSale() == 0)
+  check("description read once per link", calls == 1)
+end
+
 print("ok - " .. passed .. " checks passed")
