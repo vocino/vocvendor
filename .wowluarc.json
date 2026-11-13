@@ -40,6 +40,8 @@
       "GetRepairAllCost",
       "RepairAllItems",
       "Settings",
+      "CreateSettingsListSectionHeaderInitializer",
+      "GetServerTime",
       "MinimalSliderWithSteppersMixin",
       "StaticPopup_Show",
       "StaticPopup_Hide",

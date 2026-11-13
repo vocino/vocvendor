@@ -41,6 +41,7 @@ function ns.say(msg)
   print("|c" .. ns.PREFIX_COLOR .. name .. "|r: " .. tostring(msg))
 end
 
+-- ======= Sounds =======
 -- Confirmation sounds shared by every Voc addon (FAMILY.md "Sounds"):
 -- SOUNDKIT names first, the numeric IDs behind them so a Blizzard
 -- rename never silences the polish. Presence-gated: no sound API, no
@@ -61,6 +62,7 @@ function ns.play(kind)
   pcall(PlaySound, type(id) == "number" and id or s[2])
 end
 
+-- ======= Palette =======
 -- Palette (FAMILY.md "Palette"), defined once. VocVendor paints only
 -- its compartment tooltip, so only the text tokens are ever read.
 ns.COLORS = {
@@ -72,6 +74,7 @@ ns.COLORS = {
 }
 local COLORS = ns.COLORS
 
+-- ======= Junk definition and defaults =======
 -- The junk definition. Grays are always junk (Blizzard's own baseline,
 -- and what the native button's tooltip promises). Old gear joins the
 -- definition only when the player opts in: then it sells automatically
@@ -113,6 +116,7 @@ local defaults = {
   sellConsumables = true, -- keep one stack of the strongest per category
   autoSellConsumables = false, -- ...automatically, or behind a confirm list
   protectedItems = {},    -- item IDs that never sell (/vv protect)
+  newSeen = {},           -- per-feature seen stamps for New tags (/vv dismiss-new)
 }
 -- Per-expansion checklist: one opt-in boolean per expansion, all off.
 -- (The old Midnight keep toggle is gone; an unchecked Midnight row
@@ -123,16 +127,71 @@ ns.defaults = defaults
 VocVendorDB = VocVendorDB or {}
 ns.db = VocVendorDB
 
+-- Principle 5 onboarding, with one explicit denylist. Sale-expanding
+-- settings never auto-enable: a new sale category stays off until the
+-- player opts in. Anything else missing from an existing DB turns on
+-- with one chat line and a New tag; a fresh DB fills silently (no
+-- login spam) and never tags.
+ns.NEW_TAG_DAYS = 7
+ns.NEW_TAG_WINDOW = 7 * 24 * 60 * 60
+ns.MANUAL_OPT_IN = {
+  junkOldGear = true, oldGearBoE = true, oldGearWarbound = true,
+  autoSellConsumables = true,
+}
+for _, e in ipairs(ns.EXPANSIONS) do ns.MANUAL_OPT_IN["sell" .. e.key] = true end
+
+-- Epoch seconds for the New-tag horizon. Nil when the client cannot
+-- say: the feature still enables, it just carries no tag.
+function ns.now()
+  if type(GetServerTime) ~= "function" then return nil end
+  local ok, t = pcall(GetServerTime)
+  if ok and type(t) == "number" then return t end
+  return nil
+end
+
+function ns.isNew(key, now)
+  local seen = type(ns.db) == "table" and ns.db.newSeen
+  local ts = type(seen) == "table" and seen[key]
+  return type(ts) == "number" and type(now) == "number"
+    and (now - ts) < ns.NEW_TAG_WINDOW
+end
+
 function ns.opts()
   if type(ns.db) ~= "table" then ns.db = {} VocVendorDB = ns.db end
+  if type(ns.db.newSeen) ~= "table" then ns.db.newSeen = {} end
+  -- Fresh install: no saved keys yet, so there is no returning player
+  -- to announce to. Fill silently.
+  local fresh = true
+  for k in pairs(ns.db) do
+    if k ~= "newSeen" then fresh = false break end
+  end
   for k, v in pairs(defaults) do
-    if type(ns.db[k]) ~= type(v) then ns.db[k] = v end
+    if k ~= "newSeen" and type(ns.db[k]) ~= type(v) then
+      if not fresh and type(v) == "boolean" and v == true
+        and not ns.MANUAL_OPT_IN[k] then
+        ns.db[k] = true
+        local stamp = ns.now()
+        ns.db.newSeen[k] = stamp or true
+        ns.say("new setting on: " .. k)
+      else
+        ns.db[k] = v
+      end
+    end
   end
   -- The slider's own range (Settings panel), enforced here too so a
   -- hand-edited gap can never make everything (or nothing) "old gear".
   local gap = ns.db.oldGearIlvlGap
   if not (gap >= 10 and gap <= 100) then ns.db.oldGearIlvlGap = defaults.oldGearIlvlGap end
   return ns.db
+end
+
+-- Dismiss-all for New tags: clears every tag at once.
+function ns.dismissNew()
+  if type(ns.db) ~= "table" or type(ns.db.newSeen) ~= "table" then return end
+  local n = 0
+  for _ in pairs(ns.db.newSeen) do n = n + 1 end
+  ns.db.newSeen = {}
+  if n > 0 then ns.say("new tags cleared") end
 end
 
 function ns.moneyString(copper)
@@ -146,6 +205,7 @@ function ns.moneyString(copper)
   return string.format("%dc", c)
 end
 
+-- ======= Auction math =======
 -- Auction math: vendor vs auction vs disenchant-then-auction. Other
 -- pricing addons are guests (FAMILY.md principle 4): every call is
 -- presence-gated and pcall-guarded, and no data means vendor wins.
@@ -484,9 +544,11 @@ function ns.toggleProtect(text)
   local shown = text:find("item:", 1, true) and text or ("item:" .. id)
   if ns.db.protectedItems[id] then
     ns.db.protectedItems[id] = nil
+    ns.play("off")
     ns.say("no longer protected: " .. shown)
   else
     ns.db.protectedItems[id] = text:find("item:", 1, true) and text or true
+    ns.play("on")
     ns.say("protected: " .. shown)
   end
 end
@@ -497,7 +559,8 @@ function ns.listProtected()
     n = n + 1
     print("  " .. tostring(type(shown) == "string" and shown or ("item:" .. id)))
   end
-  if n == 0 then ns.say("nothing protected") end
+  if n == 0 then ns.say("nothing protected")
+  else ns.play("open") end
 end
 
 -- One full stack for a consumable link (its own max stack), nil when
@@ -520,6 +583,7 @@ function ns.slotCount(bag, slot)
   return tonumber(info.stackCount) or 1
 end
 
+-- ======= Consumables =======
 -- Confidently placed bag consumables, grouped by buff slot in first-seen
 -- order. Each item carries its slot, vendor price, and stack count.
 -- Not a sale: ranking (keep the winner) happens in ns.rankCategory, so
@@ -699,6 +763,7 @@ function ns.diagConsumables()
     ns.say("no ranked consumables in bags")
     return
   end
+  ns.play("open") -- the ranks are the readout
   ns.say("consumable ranks:")
   for _, cat in ipairs(order) do
     local ranked = ns.rankCategory(byCat[cat], descs)
@@ -746,6 +811,7 @@ function ns.reportConsumables(sale)
   local what = n == 1 and "1 item" or n .. " items"
   ns.say("losing consumables (" .. what .. "):")
   for _, g in ipairs(groups) do print(ns.mergedLine(g)) end
+  ns.play("open") -- the confirm list is the readout
   StaticPopup_Show("VOCVENDOR_SELL_CONSUMABLES",
     n, ns.moneyString(total), { items = sale })
 end
@@ -939,6 +1005,7 @@ function ns.keptLine(kept)
   return "kept " .. #kept .. " for disenchant"
 end
 
+-- ======= Sales and repair =======
 -- Sale confirmation, independent of the announce toggle: sound confirms
 -- the action, chat reports it.
 function ns.sellSound()
@@ -1035,6 +1102,7 @@ function ns.onMerchantClosed()
   ns.flushVisit()
 end
 
+-- ======= Sell Junk hook =======
 -- The native Sell Junk button, enhanced. We keep Blizzard's button,
 -- tooltip, and grays-only flow untouched; when the player's junk
 -- definition includes old gear, the click runs our dry-run first.
@@ -1192,6 +1260,7 @@ function ns.isWarbound(link)
   return ok and warbound == true
 end
 
+-- ======= Expansions and dead items =======
 -- Expansion data: the item's own expansion ID (C_Item.GetItemInfo
 -- return 15, verified against Blizzard's generated docs on live and
 -- forever). Fail closed: an unknown item, or an uncached one, is never
@@ -1675,6 +1744,7 @@ function ns.collectDeadItems()
   return out
 end
 
+-- ======= Ranks and keeps =======
 -- Gear kept for disenchanting: items that would sell but for the
 -- disenchant exclusion, from the old-gear gap or a checked expansion.
 -- Only non-empty when the toggle is on, the player can disenchant, and
@@ -1817,7 +1887,11 @@ local function newDERow(window)
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
     GameTooltip:SetHyperlink(self.deLink)
     GameTooltip:AddLine("Click to disenchant",
-      COLORS.muted[1], COLORS.muted[2], COLORS.muted[3])
+      COLORS.text[1], COLORS.text[2], COLORS.text[3])
+    if type(InCombatLockdown) == "function" and InCombatLockdown() then
+      GameTooltip:AddLine("Does not work in combat",
+        COLORS.red[1], COLORS.red[2], COLORS.red[3])
+    end
     GameTooltip:Show()
   end)
   row:SetScript("OnLeave", function()
@@ -1826,6 +1900,7 @@ local function newDERow(window)
   return row
 end
 
+-- ======= Disenchant and delete windows =======
 -- Lazily builds the window on Blizzard's own dialog template: gold
 -- title, stock close button, escapable, draggable. Nil when the
 -- template is missing, so sales still report over chat there.
@@ -1945,6 +2020,7 @@ function ns.reportKept(kept, chatAlways)
   if not kept or #kept == 0 then return end
   if ns.refreshDEWindow(kept) then return end
   if chatAlways or ns.opts().announce then
+    ns.play("open") -- the chat list is the readout on window-less clients
     ns.say(ns.keptLine(kept))
     for _, h in ipairs(ns.keptAuctionHints(kept)) do print(h) end
   end
@@ -2018,6 +2094,24 @@ local function newDeadRow(window)
       if not down then ns.play("on") end
     end)
   end
+  -- Tooltip contract (gold title is the item link itself): one white
+  -- line saying what the row does, and a red line while it cannot.
+  row:SetScript("OnEnter", function(self)
+    if type(IsMouseButtonDown) == "function" and IsMouseButtonDown() then return end
+    if type(GameTooltip) ~= "table" then return end
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:SetHyperlink(self.deLink)
+    GameTooltip:AddLine("Click to delete (confirms first)",
+      COLORS.text[1], COLORS.text[2], COLORS.text[3])
+    if type(InCombatLockdown) == "function" and InCombatLockdown() then
+      GameTooltip:AddLine("Does not work in combat",
+        COLORS.red[1], COLORS.red[2], COLORS.red[3])
+    end
+    GameTooltip:Show()
+  end)
+  row:SetScript("OnLeave", function()
+    if type(GameTooltip) == "table" then GameTooltip:Hide() end
+  end)
   return row
 end
 
@@ -2107,12 +2201,14 @@ function ns.reportDead(dead, chatAlways)
   if not dead or #dead == 0 then return end
   if ns.refreshDeadWindow(dead) then return end
   if chatAlways or ns.opts().announce then
+    ns.play("open") -- the chat list is the readout on window-less clients
     local what = #dead == 1 and "1 item" or #dead .. " items"
     ns.say("dead items the vendor won't buy (" .. what .. "):")
     for _, it in ipairs(dead) do print("  " .. tostring(it.link)) end
   end
 end
 
+-- ======= Settings =======
 -- Settings. Every setting carries a value-changed callback (FAMILY.md
 -- "Settings"): the definition reads live on every event, and a change
 -- mid-visit re-evaluates the merchant button at once.
@@ -2129,26 +2225,51 @@ function ns.ensureSettings()
   local category = Settings.RegisterVerticalLayoutCategory("VocVendor")
   Settings.RegisterAddOnCategory(category)
   local db = ns.opts() -- bound, defaulted table
+  local now = ns.now()
+  -- A fresh (New) tag while the feature is still unseen and inside the
+  -- 7-day horizon; the panel builds once, so the tag expires next load.
+  local function newLabel(base, key)
+    if key and ns.isNew(key, now) then return base .. " (New)" end
+    return base
+  end
+  -- Blizzard's own section headers (presence-gated): without them the
+  -- panel builds exactly as before, one flat list.
+  local canHead = type(Settings.RegisterInitializer) == "function"
+    and type(CreateSettingsListSectionHeaderInitializer) == "function"
+  local function header(name, tooltip)
+    if not canHead then return end
+    local ok, init = pcall(CreateSettingsListSectionHeaderInitializer, name, tooltip)
+    if ok and init ~= nil then
+      pcall(Settings.RegisterInitializer, category, init)
+    end
+  end
+  -- Child options gate on their parent: off shows them disabled, never
+  -- hidden, with the reason on the parent row (FAMILY.md "Settings").
+  local function gateChild(childInit, parentInit, parentKey)
+    if type(childInit) == "table"
+      and type(childInit.SetParentInitializer) == "function" then
+      childInit:SetParentInitializer(parentInit, function()
+        return ns.opts()[parentKey] == true
+      end)
+    end
+  end
   local function check(key, label, tooltip, onChange)
     local s = Settings.RegisterAddOnSetting(
-      category, "VocVendor_" .. key, key, db, type(defaults[key]), label, defaults[key])
-    Settings.CreateCheckbox(category, s, tooltip)
+      category, "VocVendor_" .. key, key, db, type(defaults[key]), newLabel(label, key), defaults[key])
+    local init = Settings.CreateCheckbox(category, s, tooltip)
     ns.onSettingChanged(s, onChange or ns.refreshJunkButton)
+    return init
   end
+  header("Selling",
+    "What counts as junk and how it sells. Item keeps live on the slash line: /vv protect keeps an item out of every sale.")
   check("autoSell", "Auto-sell junk",
     "Sell junk automatically on every vendor visit. Junk is what you configure below.")
-  check("autoRepair", "Auto-repair",
-    "Repair all gear automatically at vendors that repair.")
-  check("guildRepair", "Guild funds first",
-    "Pay repairs from the guild bank when possible, your own gold otherwise.")
-  check("announce", "Chat announcements",
-    "Print a line when VocVendor sells or repairs.")
-  check("junkOldGear", "Old gear counts as junk",
+  local junkInit = check("junkOldGear", "Old gear counts as junk",
     "Gear far below your equipped item level sells with junk, automatically and on the Sell Junk button. Off keeps it out of the definition.")
   do
     local s = Settings.RegisterAddOnSetting(
       category, "VocVendor_oldGearIlvlGap", "oldGearIlvlGap",
-      db, type(defaults.oldGearIlvlGap), "Old gear ilvl gap", defaults.oldGearIlvlGap)
+      db, type(defaults.oldGearIlvlGap), newLabel("Old gear ilvl gap", "oldGearIlvlGap"), defaults.oldGearIlvlGap)
     local sliderOpts = Settings.CreateSliderOptions(10, 100, 5)
     local rightLabel = MinimalSliderWithSteppersMixin
       and MinimalSliderWithSteppersMixin.Label
@@ -2156,28 +2277,43 @@ function ns.ensureSettings()
     if rightLabel and type(sliderOpts.SetLabelFormatter) == "function" then
       sliderOpts:SetLabelFormatter(rightLabel)
     end
-    Settings.CreateSlider(category, s, sliderOpts,
+    local gapInit = Settings.CreateSlider(category, s, sliderOpts,
       "Gear this far below your equipped item level counts as old gear.")
     ns.onSettingChanged(s, ns.refreshJunkButton)
+    gateChild(gapInit, junkInit, "junkOldGear")
   end
-  check("oldGearBoE", "Also sell Bind on Equip",
-    "Include BoE gear in old gear. Off keeps it safe: BoE can sell well on the auction house.")
-  check("oldGearWarbound", "Also sell Warbound",
-    "Include Warbound gear in old gear. Off keeps it safe: alts can use it through the warbank.")
-  check("compareAuction", "Compare auction prices",
-    "Skip vendor sale when auction data says the auction house or disenchanting nets more. Needs Auctionator, TradeSkillMaster, or Oribos Exchange.")
-  check("sellConsumables", "Sell losing consumables",
+  gateChild(check("oldGearBoE", "Also sell Bind on Equip",
+    "Include BoE gear in old gear. Off keeps it safe: BoE can sell well on the auction house."),
+    junkInit, "junkOldGear")
+  gateChild(check("oldGearWarbound", "Also sell Warbound",
+    "Include Warbound gear in old gear. Off keeps it safe: alts can use it through the warbank."),
+    junkInit, "junkOldGear")
+  local consumeInit = check("sellConsumables", "Sell losing consumables",
     "Keep one stack of the strongest food, flask, potion and more; the rest sells with junk. Unrecognized and special items never sell.",
     ns.refreshConsumablePopup)
-  check("autoSellConsumables", "Auto-sell losing consumables",
+  gateChild(check("autoSellConsumables", "Auto-sell losing consumables",
     "Sell losing consumables automatically on every vendor visit. Off shows a confirm list first.",
-    ns.refreshConsumablePopup)
+    ns.refreshConsumablePopup),
+    consumeInit, "sellConsumables")
+  check("compareAuction", "Compare auction prices",
+    "Skip vendor sale when auction data says the auction house or disenchanting nets more. Needs Auctionator, TradeSkillMaster, or Oribos Exchange.")
   check("keepDisenchantable", "Keep disenchantable gear",
     "Enchanters only: keep gear you could disenchant out of junk sales. Off sells it with junk like any other old gear.")
+  header("Repair", "Repairs at vendors that repair, guild funds first when allowed.")
+  local repairInit = check("autoRepair", "Auto-repair",
+    "Repair all gear automatically at vendors that repair.")
+  gateChild(check("guildRepair", "Guild funds first",
+    "Pay repairs from the guild bank when possible, your own gold otherwise."),
+    repairInit, "autoRepair")
+  header("Announcements", "Chat lines for sells, repairs, and new settings.")
+  check("announce", "Chat announcements",
+    "Print a line when VocVendor sells or repairs.")
+  header("Expansions",
+    "Check an expansion to sell everything the vendor buys from it. Dead leftovers the vendor refuses collect for confirmed delete instead.")
   for _, e in ipairs(ns.EXPANSIONS) do
-    local label = "Vendor " .. e.label .. " items"
-    if e.id == ns.CURRENT_EXPANSION_ID then label = label .. " (current)" end
-    check("sell" .. e.key, label,
+    local ename = "Vendor " .. e.label .. " items"
+    if e.id == ns.CURRENT_EXPANSION_ID then ename = ename .. " (current)" end
+    check("sell" .. e.key, ename,
       "Sell everything the vendor buys from " .. e.label .. " when checked. Dead leftovers the vendor refuses collect for confirmed delete instead.")
   end
   ns.settingsBuilt = true
@@ -2186,7 +2322,8 @@ end
 
 function ns.openConfig()
   local ok = pcall(function() Settings.OpenToCategory(ns.settingsCategory:GetID()) end)
-  if not ok then ns.say("open Settings > AddOns > VocVendor") end
+  if ok then ns.play("open") -- the panel is the readout
+  else ns.say("open Settings > AddOns > VocVendor") end
 end
 
 -- Addon compartment (FAMILY.md "Addon compartment"): the toc names
@@ -2255,21 +2392,23 @@ function ns.checkRivals()
   end
 end
 
+-- ======= Slash and events =======
 -- Slash grammar shared by every Voc addon (FAMILY.md): the bare command
 -- does the one main thing (the manual junk sale, same as the native
 -- Sell Junk button), `config` opens the panel, `help` lists the rest,
 -- and anything unrecognized prints help instead of acting.
 ns.HELP = {
-  "/vv            sell junk now",
-  "/vv on|off     auto-sell junk on vendor visits",
-  "/vv repair     repair now",
-  "/vv disenchant open the disenchant list",
-  "/vv destroy    delete dead expansion items (confirms each)",
-  "/vv consume    sell losing consumables",
-  "/vv protect    keep an item out of every sale",
-  "/vv diag       show consumable ranks",
-  "/vv config     open Settings > AddOns > VocVendor",
-  "/vv help       this list (/vocvendor works too)",
+  "/vv               sell junk now",
+  "/vv on|off        auto-sell junk on vendor visits",
+  "/vv repair        repair now",
+  "/vv disenchant    open the disenchant list",
+  "/vv destroy       delete dead expansion items (confirms each)",
+  "/vv consume       sell losing consumables",
+  "/vv protect       keep an item out of every sale",
+  "/vv diag          show consumable ranks",
+  "/vv dismiss-new   clear all New tags",
+  "/vv config        open Settings > AddOns > VocVendor",
+  "/vv help          this list (/vocvendor works too)",
 }
 function ns.help()
   ns.say("commands")
@@ -2334,6 +2473,8 @@ SlashCmdList.VOCVENDOR = function(msg)
     ns.toggleProtect(raw:sub(9))
   elseif msg == "diag" then
     ns.diagConsumables()
+  elseif msg == "dismiss-new" then
+    ns.dismissNew()
   elseif msg == "config" then
     ns.openConfig()
   else

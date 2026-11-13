@@ -279,9 +279,12 @@ local function loadAddon(world)
   end
   g.GameTooltip = {
     SetOwner = function(_, owner, anchor) world.gametip.owner, world.gametip.anchor = owner, anchor end,
-    ClearLines = function() world.gametip.lines = {} end,
+    ClearLines = function() world.gametip.lines = {} world.gametip.colors = {} end,
     SetText = function(_, t, r, gg, b) world.gametip.title = t world.gametip.titleColor = { r, gg, b } end,
-    AddLine = function(_, t) world.gametip.lines[#world.gametip.lines + 1] = t end,
+    AddLine = function(_, t, r, gg, b)
+      world.gametip.lines[#world.gametip.lines + 1] = t
+      world.gametip.colors[#world.gametip.colors + 1] = { r, gg, b }
+    end,
     Show = function() world.gametip.shown = true end,
     Hide = function() world.gametip.shown = false end,
     SetHyperlink = function(_, link) world.gametip.link = link end,
@@ -308,17 +311,40 @@ local function loadAddon(world)
     RegisterAddOnCategory = function() end,
     RegisterAddOnSetting = function(_, var, key, _, _, label, default)
       world.settingsReg[var] = { key = key, label = label, default = default }
+      world.lastRegKey = key
       return { var = var,
         SetValueChangedCallback = function(_, fn) world.settingCallbacks[var] = fn end }
     end,
-    CreateCheckbox = function() world.settingsChecks = world.settingsChecks + 1 end,
+    -- Initializers carry their setting key so gating tests can name the
+    -- parent each child hangs under.
+    CreateCheckbox = function()
+      world.settingsChecks = world.settingsChecks + 1
+      local init = { key = world.lastRegKey }
+      init.SetParentInitializer = function(self, parent, pred)
+        world.gated[#world.gated + 1] = { child = self, parent = parent, pred = pred }
+      end
+      return init
+    end,
     CreateSliderOptions = function(min, max, step)
       return { min = min, max = max, step = step,
         SetLabelFormatter = function() end }
     end,
-    CreateSlider = function() world.settingsSliders = world.settingsSliders + 1 end,
+    CreateSlider = function()
+      world.settingsSliders = world.settingsSliders + 1
+      local init = { key = world.lastRegKey }
+      init.SetParentInitializer = function(self, parent, pred)
+        world.gated[#world.gated + 1] = { child = self, parent = parent, pred = pred }
+      end
+      return init
+    end,
+    RegisterInitializer = function(_, init)
+      world.settingsHeaders[#world.settingsHeaders + 1] = init
+    end,
     OpenToCategory = function() end,
   }
+  g.CreateSettingsListSectionHeaderInitializer = function(name)
+    return { header = name }
+  end
   g.MinimalSliderWithSteppersMixin = { Label = { Right = {} } }
   -- Pawn guest: world.pawnUpgrades[link] = true means Pawn flags an upgrade.
   if world.withPawn then
@@ -364,7 +390,7 @@ local function newWorld()
     bags = {}, slots = {}, minLevels = {}, levels = {}, classIDs = {},
     subclassIDs = {}, rarities = {}, prices = {}, bindTypes = {},
     setIDs = {}, itemIDs = {}, uncached = {}, warbound = {}, equipSets = {}, expansions = {},
-    equipped = {}, printed = {}, frames = {}, gametip = { lines = {} },
+    equipped = {}, printed = {}, frames = {}, gametip = { lines = {}, colors = {} },
     money = 100000, junkCount = 0, junkValue = 0, junkSold = false,
     sold = {}, repairs = {}, popups = {},
     canRepair = true, repairCost = 0, repairCan = false,
@@ -372,7 +398,8 @@ local function newWorld()
     merchantOpen = true, withPawn = false, pawnUpgrades = {}, canDE = false,
     withAutoGear = false, gearScores = {},
     settingsReg = {}, settingsChecks = 0, settingsSliders = 0,
-    settingCallbacks = {},
+    settingCallbacks = {}, settingsHeaders = {}, gated = {},
+    lastRegKey = nil,
     settingsCategory = nil, savedVars = nil,
     blizzClicked = false, hookedClick = {}, hooks = {}, buttonEnabled = nil,
     playedSounds = {}, noValues = {},
@@ -2513,6 +2540,208 @@ do
   -- No score and no ilvl: unknown keeps.
   w.gearScores[better] = nil
   check("no metric keeps", ns.isOldGear(better, 30) == false)
+end
+
+-- 84. Children gate on their parents and sections head the panel.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local gateOf = {}
+  for _, g in ipairs(w.gated) do gateOf[g.child.key] = g end
+  check("gap gated under junk", gateOf.oldGearIlvlGap
+    and gateOf.oldGearIlvlGap.parent.key == "junkOldGear")
+  check("BoE gated under junk", gateOf.oldGearBoE
+    and gateOf.oldGearBoE.parent.key == "junkOldGear")
+  check("Warbound gated under junk", gateOf.oldGearWarbound
+    and gateOf.oldGearWarbound.parent.key == "junkOldGear")
+  check("auto consumables gated", gateOf.autoSellConsumables
+    and gateOf.autoSellConsumables.parent.key == "sellConsumables")
+  check("guild repair gated", gateOf.guildRepair
+    and gateOf.guildRepair.parent.key == "autoRepair")
+  check("five gated children", #w.gated == 5)
+  ns.opts().junkOldGear = false
+  check("predicate follows the parent off", gateOf.oldGearIlvlGap.pred() == false)
+  ns.opts().junkOldGear = true
+  check("predicate follows the parent on", gateOf.oldGearIlvlGap.pred() == true)
+  check("four headers", #w.settingsHeaders == 4)
+  check("selling heads the panel", w.settingsHeaders[1].header == "Selling")
+  check("repair sectioned", w.settingsHeaders[2].header == "Repair")
+  check("announcements sectioned", w.settingsHeaders[3].header == "Announcements")
+  check("expansions sectioned", w.settingsHeaders[4].header == "Expansions")
+end
+
+-- 85. Onboarding: a returning player auto-enables safe settings with one
+-- chat line each and a New tag; sale-expanding keys stay off silently.
+do
+  local w = newWorld()
+  w.savedVars = { autoSell = false } -- an old DB missing newer keys
+  local ns = loadAddon(w)
+  w.env.GetServerTime = function() return 2000000 end
+  clientLoaded(w)
+  local o = ns.opts()
+  check("safe setting auto-on", o.keepDisenchantable == true)
+  check("compare auto-on", o.compareAuction == true)
+  check("denied setting stays off", o.junkOldGear == false)
+  check("denied expansion stays off", o.sellLegion == false)
+  local announced = {}
+  for _, line in ipairs(w.printed) do announced[line] = true end
+  check("announced once per setting", #w.printed == 6
+    and announced["|cff66ccffVocVendor|r: new setting on: autoRepair"]
+    and announced["|cff66ccffVocVendor|r: new setting on: guildRepair"]
+    and announced["|cff66ccffVocVendor|r: new setting on: announce"]
+    and announced["|cff66ccffVocVendor|r: new setting on: keepDisenchantable"]
+    and announced["|cff66ccffVocVendor|r: new setting on: compareAuction"]
+    and announced["|cff66ccffVocVendor|r: new setting on: sellConsumables"])
+  check("denied setting untagged", ns.db.newSeen.junkOldGear == nil)
+  check("fresh tag visible", ns.isNew("keepDisenchantable", 2000000) == true)
+  check("tag expires after the horizon",
+    ns.isNew("keepDisenchantable", 2000000 + 8 * 24 * 60 * 60) == false)
+end
+
+-- 86. Fresh installs fill silently; a missing clock still enables, tagless.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts()
+  check("fresh install silent", #w.printed == 0)
+  check("fresh install untagged", next(ns.db.newSeen) == nil)
+  local old = newWorld()
+  old.savedVars = { autoSell = false }
+  local nso = loadAddon(old)
+  clientLoaded(old) -- no GetServerTime: the client cannot say
+  check("clockless auto-on", nso.opts().keepDisenchantable == true)
+  check("clockless tagless", nso.isNew("keepDisenchantable", 2000000) == false)
+end
+
+-- 87. New tags label the panel and dismiss-new clears them at once.
+do
+  local w = newWorld()
+  w.savedVars = { autoSell = true }
+  local ns = loadAddon(w)
+  w.env.GetServerTime = function() return 2000000 end
+  clientLoaded(w) -- onboarding stamps inside the panel build
+  check("new setting tagged",
+    w.settingsReg["VocVendor_keepDisenchantable"].label:find("(New)", 1, true) ~= nil)
+  check("denied setting untagged",
+    w.settingsReg["VocVendor_junkOldGear"].label:find("New", 1, true) == nil)
+  w.env.SlashCmdList.VOCVENDOR("dismiss-new")
+  check("dismiss clears every tag", next(ns.db.newSeen) == nil)
+  check("dismiss confirms",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: new tags cleared")
+  w.env.SlashCmdList.VOCVENDOR("dismiss-new")
+  check("empty dismiss stays silent",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: new tags cleared")
+end
+
+-- 88. Readouts and toggles confirm with sound; nothing-lines stay silent.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local link = gear(w, { slot = "INVTYPE_HEAD", level = 100 })
+  ns.toggleProtect(link)
+  check("protect confirms on", w.playedSounds[1] == 856)
+  ns.toggleProtect(link)
+  check("unprotect confirms off", w.playedSounds[2] == 857)
+  w.playedSounds = {}
+  ns.listProtected()
+  check("empty list stays silent",
+    #w.playedSounds == 0
+    and w.printed[#w.printed] == "|cff66ccffVocVendor|r: nothing protected")
+  ns.toggleProtect(link)
+  w.playedSounds = {}
+  ns.listProtected()
+  check("list confirms open", w.playedSounds[1] == 850)
+  w.playedSounds = {}
+  ns.openConfig()
+  check("config confirms open", w.playedSounds[1] == 850)
+  -- Kept fallback: windowless clients read out over chat, with sound.
+  local n = newWorld()
+  n.canDE = true
+  n.repairCan = false
+  n.noSecure = true
+  local nsn = loadAddon(n)
+  clientLoaded(n)
+  nsn.opts().junkOldGear = true
+  n.equipped[1] = gear(n, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(n, gear(n, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  n.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("kept fallback confirms open", n.playedSounds[1] == 850)
+  -- Dead fallback over chat confirms the same way.
+  local d = newWorld()
+  local nsd = loadAddon(d)
+  clientLoaded(d)
+  nsd.opts().sellLegion = true
+  local ap = gear(d, { classID = 0, expansion = 6, price = 0 })
+  d.artifactPower[ap] = true
+  putBag(d, ap)
+  d.env.UIParent = nil
+  d.playedSounds = {}
+  d.env.SlashCmdList.VOCVENDOR("destroy")
+  check("dead fallback confirms open", d.playedSounds[1] == 850)
+  -- The consumable confirm list confirms as it opens.
+  local c = newWorld()
+  loadAddon(c)
+  clientLoaded(c)
+  c.unitStats = { [1] = 500, [2] = 100, [4] = 100 }
+  local SC = c.env.Enum.ItemConsumableSubclass
+  putStack(c, use(c, { sub = SC.Potion, price = 50,
+    desc = "use: restores 20000 health." }), 2)
+  putStack(c, use(c, { sub = SC.Potion, price = 200,
+    desc = "use: restores 90000 health." }), 1)
+  c.playedSounds = {}
+  c.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("confirm list confirms open", c.playedSounds[1] == 850)
+end
+
+-- 89. Row tooltips name the action in white and warn red in combat.
+do
+  local w = newWorld()
+  w.canDE = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  local row = ns.deRows[1]
+  w.gametip.lines = {}
+  w.gametip.colors = {}
+  row.scripts.OnEnter(row)
+  check("disenchant action in white", w.gametip.lines[1] == "Click to disenchant"
+    and w.gametip.colors[1][1] == 1 and w.gametip.colors[1][2] == 1)
+  check("no restriction outside combat", #w.gametip.lines == 1)
+  w.combat = true
+  w.gametip.lines = {}
+  w.gametip.colors = {}
+  row.scripts.OnEnter(row)
+  check("combat restriction in red", w.gametip.lines[2] == "Does not work in combat"
+    and w.gametip.colors[2][1] == 0.9)
+  check("drag never tooltips", (function()
+    w.env.IsMouseButtonDown = function() return true end
+    w.gametip.lines = {}
+    row.scripts.OnEnter(row)
+    w.env.IsMouseButtonDown = function() return false end
+    return #w.gametip.lines == 0
+  end)())
+  -- The delete row follows the same contract.
+  local d = newWorld()
+  local nsd = loadAddon(d)
+  clientLoaded(d)
+  nsd.opts().sellLegion = true
+  local ap = gear(d, { classID = 0, expansion = 6, price = 0 })
+  d.artifactPower[ap] = true
+  putBag(d, ap)
+  d.env.SlashCmdList.VOCVENDOR("destroy")
+  local drow = nsd.deadRows[1]
+  d.gametip.lines = {}
+  d.gametip.colors = {}
+  drow.scripts.OnEnter(drow)
+  check("delete action in white", d.gametip.lines[1] == "Click to delete (confirms first)"
+    and d.gametip.colors[1][1] == 1)
 end
 
 print("ok - " .. passed .. " checks passed")

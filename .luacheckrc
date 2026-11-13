@@ -1,9 +1,9 @@
--- Lint config shared across the Voc family (see FAMILY.md). The WoW
+-- Lint config shared across the Voc family (see the skill's family/FAMILY.md). The WoW
 -- client runs Lua 5.1; tests may use 5.4 features behind guards.
 --
 -- read_globals is the allowlist of WoW API verified against the build
 -- in `## Interface:` (Blizzard_APIDocumentationGenerated for that
--- build, see FAMILY.md "Sources of truth"). Lint fails on any other
+-- build, see the skill's family/FAMILY.md "Sources of truth"). Lint fails on any other
 -- global on purpose: add a name here only after confirming it exists,
 -- under that namespace, in the current build. Never from a wiki.
 std = "lua51"
@@ -42,6 +42,8 @@ read_globals = {
   "CanGuildBankRepair", "CanMerchantRepair", "GetRepairAllCost",
   "RepairAllItems", -- mirror of the merchant repair buttons (live + forever)
   "Settings", -- native panel, retried at PLAYER_LOGIN (live + forever)
+  "CreateSettingsListSectionHeaderInitializer", -- section headers, presence-gated (live + forever)
+  "GetServerTime", -- New-tag horizon clock, presence-gated (live + forever)
   "MinimalSliderWithSteppersMixin", -- slider label formatter, presence-gated
   "StaticPopup_Show", "StaticPopup_Hide", -- Sell All confirms (live + forever)
   "Enum", -- ItemClass/ItemBind/ItemQuality values identical on both clients
