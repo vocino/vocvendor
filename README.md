@@ -26,16 +26,17 @@ compartment on the minimap opens the settings, or the disenchant list
 while kept gear waits.
 
 ```
-/vv            sell junk now
-/vv on|off     auto-sell junk on vendor visits
-/vv repair     repair now
-/vv disenchant open the disenchant list
-/vv destroy    delete dead expansion items (confirms each)
-/vv consume    sell losing consumables
-/vv protect    keep an item out of every sale
-/vv diag       show consumable ranks
-/vv config     open Settings > AddOns > VocVendor
-/vv help       this list (/vocvendor works too)
+/vv               sell junk now
+/vv on|off        auto-sell junk on vendor visits
+/vv repair        repair now
+/vv disenchant    open the disenchant list
+/vv destroy       delete dead expansion items (confirms each)
+/vv consume       sell losing consumables
+/vv protect       keep an item out of every sale
+/vv diag          show consumable ranks
+/vv dismiss-new   clear all New tags
+/vv config        open Settings > AddOns > VocVendor
+/vv help          this list (/vocvendor works too)
 ```
 
 ## Config
@@ -56,7 +57,12 @@ Settings > AddOns > VocVendor, or `/vv config`:
 - Auto-sell losing consumables (default off: sell them automatically on every vendor visit. Off shows a confirm list first)
 - Vendor <expansion> items (default off, all twelve from Classic to Midnight): check an expansion to sell everything the vendor buys from it, whatever the type. All keep gates still hold; dead leftovers the vendor refuses collect for confirmed delete instead
 
-Every change applies at once.
+Every change applies at once. Child options disable while their parent
+is off (old-gear details need old gear, auto-selling consumables
+needs the consumable sale, guild funds need auto-repair). New settings announce once in
+chat with a New tag that expires after a week; `/vv dismiss-new`
+clears every tag at once. Sale-expanding settings never auto-enable:
+a new sale category stays off until you check it.
 
 ## How it works
 
@@ -114,4 +120,5 @@ Part of the Voc family: tiny addons that do one job.
 [VocWarbank](https://github.com/vocino/vocwarbank) ·
 [VocGear](https://github.com/vocino/vocgear) ·
 [VocXP](https://github.com/vocino/vocxp) ·
-[VocVendor](https://github.com/vocino/vocvendor)
+[VocVendor](https://github.com/vocino/vocvendor) ·
+[VocSpeak](https://github.com/vocino/vocspeak)
