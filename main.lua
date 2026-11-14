@@ -1443,11 +1443,12 @@ end
 --
 -- Two jobs, both fail closed. ns.autoGearSaysUpgrade is the veto, like
 -- Pawn: never sell what the guest rates above equipped. ns.gearScore
--- is the fallback metric for isOldGear when the client gives no item
--- level: callers sell on a strictly lower score, like a gap of 1 on
--- ilvl clients. A missing guest or a failed read scores nil (unknown
--- keeps), never zero (zero is a score, and it loses). Ties keep: an
--- unscored epsilon tie is not proven worse.
+-- is the primary rank for isOldGear wherever it rates both ends: the
+-- guest's stat weights outrank raw item level, so callers sell on a
+-- strictly lower score and the ilvl gap covers only what the guest
+-- cannot score. A missing guest or a failed read scores nil (unknown
+-- keeps), never zero (zero is a score, and it loses). Ties keep: a
+-- scored epsilon tie is not proven worse.
 -- (No margin cushion: while questing, replacements land a few points
 -- below equipped, and a cushion keeps every one of them.)
 
@@ -1501,7 +1502,8 @@ function ns.autoGearSaysUpgrade(link, scan)
 end
 
 -- True when the bag item is weapons/armor gear at least `gap` item levels
--- below everything equipped in its slot(s), passing the exclusion
+-- below everything equipped in its slot(s) -- or strictly lower-scored
+-- wherever AutoGear rates both ends -- passing the exclusion
 -- filters. Gear kept for disenchanting never qualifies (unless
 -- ignoreDE). Uncached items are skipped rather than guessed about.
 --
@@ -1623,13 +1625,28 @@ function ns.isOldGear(link, gap, ignoreDE, scan, why)
   end
   local slots = ns.slotPairs[equipLoc] or { ns.primarySlot[equipLoc] }
   local candLevel = C_Item.GetDetailedItemLevelInfo(link)
-  -- No item level from the client: rank by the guest score instead, with
-  -- the score margin in place of the ilvl gap. No metric at all keeps.
-  local useScore = (candLevel == nil)
-  local candScore = nil
+  local candScore = ns.gearScore(link, scan)
+  -- Score-first: the guest outranks raw ilvl wherever it rates both
+  -- ends. Same-level gear clusters within a point or two of ilvl
+  -- while stats differ (Forever quest greens), so an ilvl gap alone
+  -- keeps nearly everything. Score mode needs the candidate plus
+  -- anything equipped in its slots scored; otherwise the ilvl gap
+  -- covers the item, and an item with neither metric keeps.
+  local useScore = candScore ~= nil
   if useScore then
-    candScore = ns.gearScore(link, scan)
-    if not candScore then return stop("no AutoGear score") end
+    useScore = false
+    for _, slotID in ipairs(slots) do
+      if slotID then
+        local eqLink = GetInventoryItemLink("player", slotID)
+        if eqLink and ns.gearScore(eqLink, scan) then
+          useScore = true
+          break
+        end
+      end
+    end
+  end
+  if not useScore and candLevel == nil and candScore == nil then
+    return stop("no AutoGear score")
   end
   local compared, best = false, 0
   for _, slotID in ipairs(slots) do
@@ -1648,7 +1665,7 @@ function ns.isOldGear(link, gap, ignoreDE, scan, why)
           end
         else
           local eqLevel = C_Item.GetDetailedItemLevelInfo(eqLink)
-          if eqLevel then
+          if eqLevel and candLevel then
             compared = true
             if eqLevel > best then best = eqLevel end
             -- Below the weakest equipped piece by the full gap, or keep.
@@ -2338,7 +2355,7 @@ function ns.ensureSettings()
       sliderOpts:SetLabelFormatter(rightLabel)
     end
     local gapInit = Settings.CreateSlider(category, s, sliderOpts,
-      "Gear this far below your equipped item level counts as old gear. Where the client reports no item levels, old gear sells on a strictly lower guest score instead.")
+      "Gear this far below your equipped item level counts as old gear. When AutoGear scores both items, its score decides instead.")
     ns.onSettingChanged(s, ns.refreshJunkButton)
     gateChild(gapInit, junkInit, "junkOldGear")
   end

@@ -49,7 +49,7 @@ Settings > AddOns > VocVendor, or `/vv config`:
 - Guild funds first (default on)
 - Chat announcements (default on)
 - Old gear counts as junk (default off)
-- Old gear ilvl gap (1-100, default 30: 1 sells anything worse than equipped)
+- Old gear ilvl gap (1-100, default 30: 1 sells anything worse than equipped; AutoGear-scored gear sells on a strictly lower score instead)
 - Also sell Bind on Equip (default off: BoE can sell on the auction house)
 - Also sell Warbound (default off: alts can use it through the warbank)
 - Compare auction prices (default on: with Auctionator, TradeSkillMaster, or Oribos Exchange installed, gear worth more on the auction house is held back with its reason instead of sold)
@@ -69,9 +69,8 @@ a new sale category stays off until you check it.
 
 Grays go through Blizzard's own junk sale, the same call the Sell
 Junk button makes. Old gear is weapons and armor at least the
-configured gap below everything you wear in that slot (on clients
-that report no item levels, anything the guest scores strictly lower
-sells instead), never
+configured gap below everything you wear in that slot (when AutoGear
+scores both items, anything it scores strictly lower sells instead), never
 heirlooms, never profession tools (fishing poles are tools, not
 weapons, whatever is equipped), never anything in a saved equipment
 set, never anything AutoGear rates above what you wear when it is

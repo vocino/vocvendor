@@ -2513,7 +2513,7 @@ do
 end
 
 -- 83. AutoGear guest: the upgrade veto always holds, and its score
--- ranks old gear when the client gives no item level.
+-- outranks raw ilvl wherever it rates both ends.
 do
   local w = newWorld()
   w.withAutoGear = true
@@ -2832,6 +2832,46 @@ do
   check("no gear answers",
     #e.playedSounds == 0
     and e.printed[1] == "|cff66ccffVocVendor|r: no gear in bags")
+end
+
+-- 93. Score-first: the guest outranks raw ilvl wherever it rates both
+-- ends (Forever gear clusters within a point or two of ilvl while
+-- stats differ, so an ilvl gap alone keeps nearly everything).
+do
+  local w = newWorld()
+  w.withAutoGear = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  w.gearScores[w.equipped[1]] = 500
+  -- Equal ilvl but a lower guest score: a stat loser sells.
+  local side = gear(w, { slot = "INVTYPE_HEAD", level = 400, price = 1000 })
+  w.gearScores[side] = 100
+  check("lower-scored sidegrade sells", ns.isOldGear(side, 1) == true)
+  local why = {}
+  ns.isOldGear(side, 1, nil, nil, why)
+  check("score sell verdict",
+    why.reason == "sells: score 100 vs 500 equipped")
+  -- Higher ilvl but a lower guest score: the score still decides.
+  local wrong = gear(w, { slot = "INVTYPE_HEAD", level = 410, price = 1000 })
+  w.gearScores[wrong] = 100
+  check("lower-scored higher-ilvl sells", ns.isOldGear(wrong, 1) == true)
+  -- Higher guest score: the upgrade veto still holds.
+  local up = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  w.gearScores[up] = 600
+  check("higher-scored gear keeps", ns.isOldGear(up, 1) == false)
+  -- Unscored candidate: the ilvl gap still covers it.
+  local plain = gear(w, { slot = "INVTYPE_HEAD", level = 400, price = 1000 })
+  check("unscored sidegrade keeps", ns.isOldGear(plain, 1) == false)
+  local old = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  check("unscored old gear sells", ns.isOldGear(old, 30) == true)
+  -- Scored candidate against unscored equipped: ilvl covers the pair.
+  w.gearScores[w.equipped[1]] = nil
+  local gapOld = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  w.gearScores[gapOld] = 50
+  check("unscored equipped falls back to ilvl",
+    ns.isOldGear(gapOld, 30) == true)
 end
 
 print("ok - " .. passed .. " checks passed")
