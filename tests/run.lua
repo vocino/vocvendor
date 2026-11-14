@@ -44,7 +44,19 @@ local function loadAddon(world)
     UseContainerItem = function(bag, slot)
       -- world.sellErrors["bag:slot"] makes the click fail; world.stuck
       -- leaves the item behind so the post-click check sees it.
+      -- world.clickFails["bag:slot"] silently skips the sale that many
+      -- times first (a transient refusal), then sells normally.
+      -- world.emitVendorError replays a UI_ERROR_MESSAGE mid-sale, the
+      -- way the engine answers a refused click.
+      if world.emitVendorError and world.frame then
+        world.frame.onEvent(nil, "UI_ERROR_MESSAGE", 1, world.emitVendorError)
+      end
       if world.sellErrors[bag .. ":" .. slot] then error("sell failed") end
+      local fails = world.clickFails[bag .. ":" .. slot]
+      if fails and fails > 0 then
+        world.clickFails[bag .. ":" .. slot] = fails - 1
+        return true
+      end
       world.sold[#world.sold + 1] = { bag = bag, slot = slot }
       if not world.stuck[bag .. ":" .. slot] then
         world.removed[bag .. ":" .. slot] = true
@@ -61,7 +73,8 @@ local function loadAddon(world)
     GetContainerItemInfo = function(bag, slot)
       if world.noContainerInfo then return nil end
       return { hasNoValue = world.noValues[bag .. ":" .. slot] == true,
-        stackCount = world.stackCounts[bag .. ":" .. slot] }
+        stackCount = world.stackCounts[bag .. ":" .. slot],
+        isLocked = world.locked[bag .. ":" .. slot] == true }
     end,
     PickupContainerItem = function(bag, slot)
       world.cursor = { bag = bag, slot = slot }
@@ -190,6 +203,18 @@ local function loadAddon(world)
     return s[1], s[2]
   end
   g.UnitStat = function(_, i) return (world.unitStats or {})[i] end
+  -- world.withTimer queues deferred visit work instead of running it
+  -- now (world.timerFails makes the timer API error, testing the
+  -- immediate fallback); fire it with world.deferred in test order.
+  if world.withTimer then
+    if world.timerFails then
+      g.C_Timer = { After = function() error("no timers") end }
+    else
+      g.C_Timer = { After = function(_, fn)
+        world.deferred[#world.deferred + 1] = fn
+      end }
+    end
+  end
   -- world.denySecrets simulates the client refusing a secret read:
   -- the gated code must degrade, never error.
   g.canaccessvalue = function() return world.denySecrets ~= true end
@@ -403,7 +428,7 @@ local function newWorld()
     settingsCategory = nil, savedVars = nil,
     blizzClicked = false, hookedClick = {}, hooks = {}, buttonEnabled = nil,
     playedSounds = {}, noValues = {},
-    removed = {}, stuck = {}, sellErrors = {},
+    removed = {}, stuck = {}, sellErrors = {}, clickFails = {}, locked = {}, deferred = {},
     itemSpells = {}, spellDescs = {}, unitStats = {}, hiddenPopups = {},
     stackCounts = {}, maxStacks = {},
     cosmetic = {}, transmogSet = {}, noTransmog = {},
@@ -1528,9 +1553,9 @@ do
   check("nothing collected without the API", #ns.collectJunk().oldGear == 0)
 end
 
--- 52. A failing click halts the loop: the failing item and everything
--- after it come back as leftovers with per-row reasons, and nothing
--- later is even attempted.
+-- 52. A failing click no longer vetoes the visit: everything else
+-- still sells, the failure gets one second chance, and a genuine
+-- refusal reports once.
 do
   local w = newWorld()
   local ns = loadAddon(w)
@@ -1543,30 +1568,27 @@ do
   local b1, s1 = putBag(w, first)
   local b2, s2 = putBag(w, bad)
   local b3, s3 = putBag(w, after)
-  w.sellErrors[b2 .. ":" .. s2] = true -- the click errors
+  w.sellErrors[b2 .. ":" .. s2] = true -- the click errors, both passes
   local n, value, leftover = ns.sellOldGearItems({
     { link = first, bag = b1, slot = s1, price = 1000 },
     { link = bad, bag = b2, slot = s2, price = 1000 },
     { link = after, bag = b3, slot = s3, price = 1000 },
   })
-  check("one sold before the failure", n == 1 and value == 1000)
-  check("loop halted at the failure", #w.sold == 1)
-  check("failing item listed", leftover[1].link == bad)
+  check("both sellable items sold", n == 2 and value == 2000)
+  check("later items still attempted", #w.sold == 2)
+  check("failing item listed once", #leftover == 1 and leftover[1].link == bad)
   check("failing reason", leftover[1].reason == "sell failed")
-  check("rest listed as stopped",
-    #leftover == 2 and leftover[2].link == after
-    and leftover[2].reason == "sale stopped")
   ns.reportLeftover(leftover)
   check("leftover header",
-    w.printed[1] == "|cff66ccffVocVendor|r: couldn't sell 2 items:")
-  check("leftover rows name reasons",
-    w.printed[2] == "  " .. bad .. " (sell failed)"
-    and w.printed[3] == "  " .. after .. " (sale stopped)")
+    w.printed[1] == "|cff66ccffVocVendor|r: couldn't sell 1 item:")
+  check("leftover row names the reason",
+    w.printed[2] == "  " .. bad .. " (sell failed)")
   check("empty leftover stays silent",
     (function() local before = #w.printed ns.reportLeftover({}) return #w.printed == before end)())
 end
 
--- 53. An item the click leaves behind halts too, without retrying.
+-- 53. An item the click leaves behind gets one second chance, then
+-- reports; a transient refusal heals on the retry and sells.
 do
   local w = newWorld()
   local ns = loadAddon(w)
@@ -1575,13 +1597,34 @@ do
   w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
   local stuck = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
   local sb, ss = putBag(w, stuck)
-  w.stuck[sb .. ":" .. ss] = true -- sold but still in the slot
+  local good = gear(w, { slot = "INVTYPE_HEAD", level = 310, price = 1000 })
+  local gb, gs = putBag(w, good)
+  w.stuck[sb .. ":" .. ss] = true -- click runs but the slot keeps the item
   local n, _, leftover = ns.sellOldGearItems({
     { link = stuck, bag = sb, slot = ss, price = 1000 },
+    { link = good, bag = gb, slot = gs, price = 1000 },
   })
-  check("stuck item not counted", n == 0)
-  check("no retry", #w.sold == 1)
-  check("stuck reason", #leftover == 1 and leftover[1].reason == "still in bags")
+  check("good item still sells", n == 1)
+  check("one second chance, not a loop", #w.sold == 3)
+  check("stuck reported once",
+    #leftover == 1 and leftover[1].reason == "still in bags")
+  -- Transient: the first click is silently skipped, the retry sells.
+  local t = newWorld()
+  local nst = loadAddon(t)
+  clientLoaded(t)
+  nst.opts().junkOldGear = true
+  t.equipped[1] = gear(t, { slot = "INVTYPE_HEAD", level = 400 })
+  local flaky = gear(t, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  local fb, fs = putBag(t, flaky)
+  local next = gear(t, { slot = "INVTYPE_HEAD", level = 310, price = 1000 })
+  local nb, nsl = putBag(t, next)
+  t.clickFails[fb .. ":" .. fs] = 1
+  local tn, _, tleft = nst.sellOldGearItems({
+    { link = flaky, bag = fb, slot = fs, price = 1000 },
+    { link = next, bag = nb, slot = nsl, price = 1000 },
+  })
+  check("transient heals on retry", tn == 2 and #tleft == 0)
+  check("nothing left behind", #t.sold == 2)
 end
 
 -- 54. Collection gate: uncollected appearances, toys, and pets never
@@ -2872,6 +2915,152 @@ do
   w.gearScores[gapOld] = 50
   check("unscored equipped falls back to ilvl",
     ns.isOldGear(gapOld, 30) == true)
+end
+
+-- 94. MERCHANT_SHOW sells even when the merchant frame is not shown
+-- yet: the sale runs inside the SHOW dispatch, so a visibility check
+-- alone reads false and every item reports "vendor closed".
+do
+  local w = newWorld()
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  w.merchantOpen = false -- frame hidden: SHOW dispatched before it shows
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("SHOW sells with the frame hidden", #w.sold == 1)
+  local blamed = false
+  for _, line in ipairs(w.printed) do
+    if line:find("vendor closed", 1, true) then blamed = true end
+  end
+  check("no vendor-closed report on open", blamed == false)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("one deferred line for the visit", #w.printed == 1)
+  -- After close, a late sale explains instead of attempting.
+  local w2 = newWorld()
+  local ns2 = loadAddon(w2)
+  clientLoaded(w2)
+  local link = gear(w2, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  local b, s = putBag(w2, link)
+  w2.merchantOpen = false
+  local n, _, leftover = ns2.sellOldGearItems(
+    { { link = link, bag = b, slot = s, price = 1000 } })
+  check("closed vendor sells nothing", n == 0 and #w2.sold == 0)
+  check("closed vendor says so", leftover[1].reason == "vendor closed")
+end
+
+-- 95. The visit sale waits a beat: clicks inside the SHOW dispatch
+-- silently leave items in the bags (the session is not ready yet),
+-- while a moment later they sell fine.
+do
+  local w = newWorld()
+  w.withTimer = true
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("sale waits for the timer", #w.sold == 0 and #w.deferred == 1)
+  for _, fn in ipairs(w.deferred) do fn() end
+  w.deferred = {}
+  check("deferred sale sells", #w.sold == 1)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("visit line after close", #w.printed == 1)
+  -- A visit closed before the timer fires sells nothing: selling
+  -- outside a session would equip the gear.
+  local c = newWorld()
+  c.withTimer = true
+  c.repairCan = false
+  local nsc = loadAddon(c)
+  clientLoaded(c)
+  nsc.opts().junkOldGear = true
+  c.equipped[1] = gear(c, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(c, gear(c, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  c.frame.onEvent(nil, "MERCHANT_SHOW")
+  c.frame.onEvent(nil, "MERCHANT_CLOSED")
+  c.merchantOpen = false -- a real close hides the frame too
+  for _, fn in ipairs(c.deferred) do fn() end
+  check("closed visit sells nothing", #c.sold == 0)
+  -- A failing timer API falls back to selling now.
+  local f = newWorld()
+  f.withTimer = true
+  f.timerFails = true
+  f.repairCan = false
+  local nsf = loadAddon(f)
+  clientLoaded(f)
+  nsf.opts().junkOldGear = true
+  f.equipped[1] = gear(f, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(f, gear(f, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  f.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("broken timer sells now", #f.sold == 1)
+end
+
+-- 96. Click failures don't veto the consumable sale either: the rest
+-- still sells and a transient refusal heals on the retry.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local weak = use(w, { sub = SC.Potion, price = 50,
+    desc = "use: restores 20000 health." })
+  local strong = use(w, { sub = SC.Potion, price = 200,
+    desc = "use: restores 90000 health." })
+  local wb, ws = putStack(w, weak, 1)
+  local gb, gs = putStack(w, strong, 1)
+  w.clickFails[wb .. ":" .. ws] = 1 -- first click silently skipped
+  local n, value, leftover = ns.sellConsumableItems({
+    { link = weak, bag = wb, slot = ws, price = 50, count = 1 },
+    { link = strong, bag = gb, slot = gs, price = 200, count = 1 },
+  })
+  check("transient consumable heals", n == 2 and #leftover == 0)
+  check("skipped click not recorded", #w.sold == 2 and value == 50 + 200)
+end
+
+-- 97. Failed rows carry the discriminating facts: the slot lock state
+-- and the engine's own error during the visit.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  w.frame.onEvent(nil, "MERCHANT_SHOW") -- empty bags: arms the session
+  w.frame.onEvent(nil, "UI_ERROR_MESSAGE", 1, "ERR_VENDOR_DOESNT_BUY")
+  check("engine error recorded", ns.lastVendorError == "ERR_VENDOR_DOESNT_BUY")
+  local plain = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  local pb, ps = putBag(w, plain)
+  local held = gear(w, { slot = "INVTYPE_HEAD", level = 310, price = 1000 })
+  local hb, hs = putBag(w, held)
+  w.stuck[pb .. ":" .. ps] = true
+  w.stuck[hb .. ":" .. hs] = true
+  w.locked[hb .. ":" .. hs] = true
+  w.emitVendorError = "ERR_VENDOR_DOESNT_BUY" -- the engine refusing clicks
+  local n, _, leftover = ns.sellOldGearItems({
+    { link = plain, bag = pb, slot = ps, price = 1000 },
+    { link = held, bag = hb, slot = hs, price = 1000 },
+  })
+  check("nothing sold", n == 0)
+  check("engine error attached",
+    leftover[1].detail == "ERR_VENDOR_DOESNT_BUY")
+  check("lock state attached",
+    leftover[2].detail == "locked, ERR_VENDOR_DOESNT_BUY")
+  ns.reportLeftover(leftover)
+  check("rows read the facts",
+    w.printed[2] == "  " .. plain .. " (still in bags; ERR_VENDOR_DOESNT_BUY)"
+    and w.printed[3] == "  " .. held
+      .. " (still in bags; locked, ERR_VENDOR_DOESNT_BUY)")
+  -- Next sale starts clean: no stale error, no stale detail.
+  w.frame.onEvent(nil, "UI_ERROR_MESSAGE", 1, "SOME_OTHER_ERROR")
+  check("session closed drops errors", (function()
+    w.frame.onEvent(nil, "MERCHANT_CLOSED")
+    w.frame.onEvent(nil, "UI_ERROR_MESSAGE", 1, "ERR_VENDOR_DOESNT_BUY")
+    return ns.lastVendorError == "SOME_OTHER_ERROR"
+  end)())
 end
 
 print("ok - " .. passed .. " checks passed")

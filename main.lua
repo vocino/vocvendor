@@ -674,49 +674,93 @@ function ns.collectConsumableSale()
   return sale
 end
 
+-- The engine's own verdict on a refused click (UI_ERROR_MESSAGE
+-- during the visit: the vendor refusing the item, the gold cap, ...).
+-- Nil most of the time; cleared at the start of every sale, so a row
+-- never wears another visit's error.
+ns.lastVendorError = nil
+
+-- True when the client reports this slot locked (another operation is
+-- moving the item): a click there silently does nothing.
+function ns.slotLocked(bag, slot)
+  if type(C_Container) ~= "table" then return false end
+  if type(C_Container.GetContainerItemInfo) ~= "function" then return false end
+  local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+  return ok and type(info) == "table" and info.isLocked == true
+end
+
+-- One leftover row, with the discriminating facts attached: whether the
+-- slot was locked and what the engine said (if anything). Rows with
+-- neither read exactly as before.
+local function leftoverEntry(it, reason)
+  local e = { link = it.link, reason = reason }
+  if reason == "still in bags" then
+    local extra = {}
+    if ns.slotLocked(it.bag, it.slot) then extra[#extra + 1] = "locked" end
+    if ns.lastVendorError ~= nil then
+      extra[#extra + 1] = tostring(ns.lastVendorError)
+    end
+    if #extra > 0 then e.detail = table.concat(extra, ", ") end
+  end
+  return e
+end
+
+-- One sale attempt for a consumable stack: a guard reason, or the
+-- sold count once the click has cleared the slot. A protection marked
+-- after the confirm still holds at the click.
+local function attemptConsumableSale(it)
+  if not ns.merchantOpen() then
+    return "vendor closed", 0
+  elseif C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
+    return "moved", 0
+  elseif ns.isProtected(it.link) then
+    return "protected", 0
+  elseif not ns.slotHasValue(it.bag, it.slot) then
+    return "vendor won't buy", 0
+  end
+  local count = ns.slotCount(it.bag, it.slot)
+  local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
+  local still = false
+  if type(C_Container.GetContainerItemLink) == "function" then
+    local okLink, now = pcall(C_Container.GetContainerItemLink, it.bag, it.slot)
+    still = okLink and now == it.link
+  end
+  if ok and not still then return nil, count end
+  return ((not ok) and "sell failed" or "still in bags"), 0
+end
+
 -- Sells a consumable list, re-verifying each slot first like the old-gear
--- sale does. A protection marked after the confirm still holds at the
--- click. Same stop-on-failure contract, same leftover report.
+-- sale does. Same attempt-everything contract, same leftover report:
+-- one refusal no longer vetoes the rest, and click failures get one
+-- second chance after the pass.
 function ns.sellConsumableItems(items)
   local n, value = 0, 0
   local leftover = {}
+  local failed = {}
+  ns.lastVendorError = nil
   if type(C_Container) ~= "table" then return n, value, leftover end
   if type(C_Container.GetContainerItemLink) ~= "function" then
     return n, value, leftover
   end
   items = items or {}
-  for i, it in ipairs(items) do
-    local reason = nil
-    if not ns.merchantOpen() then
-      reason = "vendor closed"
-    elseif C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
-      reason = "moved"
-    elseif ns.isProtected(it.link) then
-      reason = "protected"
-    elseif not ns.slotHasValue(it.bag, it.slot) then
-      reason = "vendor won't buy"
-    end
-    if reason then
-      leftover[#leftover + 1] = { link = it.link, reason = reason }
+  for _, it in ipairs(items) do
+    local reason, count = attemptConsumableSale(it)
+    if reason == "sell failed" or reason == "still in bags" then
+      failed[#failed + 1] = it
+    elseif reason then
+      leftover[#leftover + 1] = leftoverEntry(it, reason)
     else
-      local count = ns.slotCount(it.bag, it.slot)
-      local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
-      local still = false
-      if type(C_Container.GetContainerItemLink) == "function" then
-        local okLink, now = pcall(C_Container.GetContainerItemLink, it.bag, it.slot)
-        still = okLink and now == it.link
-      end
-      if ok and not still then
-        n = n + count
-        value = value + (it.price or 0) * count
-      else
-        leftover[#leftover + 1] = { link = it.link,
-          reason = (not ok) and "sell failed" or "still in bags" }
-        for j = i + 1, #items do
-          leftover[#leftover + 1] = { link = items[j].link, reason = "sale stopped" }
-        end
-        break
-      end
+      n = n + count
+      value = value + (it.price or 0) * count
+    end
+  end
+  for _, it in ipairs(failed) do
+    local reason, count = attemptConsumableSale(it)
+    if reason then
+      leftover[#leftover + 1] = leftoverEntry(it, reason)
+    else
+      n = n + count
+      value = value + (it.price or 0) * count
     end
   end
   return n, value, leftover
@@ -882,73 +926,113 @@ function ns.inEquipmentSet(bag, slot)
   return inSet == true
 end
 
--- True while a merchant window is actually open. Sale clicks outside one
--- silently do nothing (a confirm popup outlives its window), so the
--- sale stops with a reason instead of a "still in bags" cascade.
+-- Whether a merchant session is open. The MERCHANT_SHOW /
+-- MERCHANT_CLOSED pair owns it: the sale runs inside the SHOW dispatch,
+-- before the merchant frame itself is shown, so visibility alone reads
+-- false there and every item reports "vendor closed". The frame check
+-- stays as a fallback (a reload mid-visit never re-fires SHOW).
+-- Sale clicks outside a session silently do nothing (a confirm popup
+-- outlives its window), so the sale stops with a reason instead of a
+-- "still in bags" cascade.
+ns.merchant = false
+
+-- Deferred sale. The merchant session is not ready the instant
+-- MERCHANT_SHOW fires (its buy list is still on the way), so clicks
+-- made inside the SHOW dispatch silently leave items in the bags while
+-- a click a moment later sells fine. The visit work therefore waits a
+-- beat: a short timer, guarded again at fire time (a closed visit
+-- sells nothing - selling outside a session would equip the gear).
+-- Without a timer API the work runs now, guarded per item as before.
+function ns.deferSale(fn)
+  if type(C_Timer) == "table" and type(C_Timer.After) == "function" then
+    local ok = pcall(C_Timer.After, 0.5, function()
+      if ns.merchantOpen() then fn() end
+    end)
+    if ok then return end
+  end
+  if ns.merchantOpen() then fn() end
+end
+
 function ns.merchantOpen()
+  if ns.merchant == true then return true end
   if type(MerchantFrame) ~= "table" then return false end
   if type(MerchantFrame.IsShown) ~= "function" then return false end
   local ok, shown = pcall(MerchantFrame.IsShown, MerchantFrame)
   return ok and shown == true
 end
 
+-- One sale attempt for a candidate: a guard reason, or nil once the
+-- click has cleared the slot. Guards (moved, equipment set, vendor
+-- value, auction verdict) hold the item without touching it; only a
+-- click that errors or leaves the item behind reports a failure.
+local function attemptOldGearSale(it, guests)
+  if not ns.merchantOpen() then
+    return "vendor closed"
+  elseif C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
+    return "moved"
+  elseif ns.inEquipmentSet(it.bag, it.slot) then
+    return "in equipment set"
+  elseif not ns.slotHasValue(it.bag, it.slot) then
+    return "vendor won't buy"
+  elseif ns.opts().compareAuction then
+    local auction = ns.getAuctionPrice(it.link, nil, guests)
+    local deValue = ns.isDisenchantable(it.link) and ns.getDisenchantValue(it.link, nil, guests) or nil
+    local verdict = ns.compareItem(it.price, auction, deValue)
+    if verdict == "auction" then
+      return "auction worth more (" .. ns.moneyString(ns.auctionNet(auction)) .. " net)"
+    elseif verdict == "disenchant" then
+      return "disenchant worth more (" .. ns.moneyString(ns.auctionNet(deValue)) .. " net)"
+    end
+  end
+  local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
+  local still = false
+  if type(C_Container.GetContainerItemLink) == "function" then
+    local okLink, now = pcall(C_Container.GetContainerItemLink, it.bag, it.slot)
+    still = okLink and now == it.link
+  end
+  if ok and not still then return nil end
+  return (not ok) and "sell failed" or "still in bags"
+end
+
 -- Sells a candidate list, re-verifying each slot first: bags shift
 -- between the dry-run and the click, and we never sell the wrong item.
 -- Set membership and vendor value are rechecked too: a slot that joined
--- a set, or that the vendor won't buy, stays put and the loop moves on.
--- A sale that fails stops the loop: the failing item and everything
--- after it come back as the leftover list with per-row reasons, and the
--- caller surfaces them. Nothing retries: a failed click left the item
--- in the bags, and clicking again only spams the server.
+-- a set, or that the vendor won't buy, holds without touching anything.
+-- Every candidate is attempted: one refusal no longer vetoes the visit,
+-- and each click stays independently verified, so a shifted bag still
+-- cannot sell the wrong item. Click failures get one second chance
+-- after the pass (a transient refusal heals by then; a genuine refusal
+-- just fails again and reports). Bounded: one extra click per failed
+-- item, never a loop.
 -- Quiet: the caller composes the announcement.
 -- Returns count, copper, and the leftover list.
 function ns.sellOldGearItems(items)
   local n, value = 0, 0
   local leftover = {}
+  local failed = {}
   local guests = ns.priceGuests()
+  ns.lastVendorError = nil
   if type(C_Container) ~= "table" then return n, value, leftover end
   if type(C_Container.GetContainerItemLink) ~= "function" then return n, value, leftover end
   items = items or {}
-  for i, it in ipairs(items) do
-    local reason = nil
-    if not ns.merchantOpen() then
-      reason = "vendor closed"
-    elseif C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
-      reason = "moved"
-    elseif ns.inEquipmentSet(it.bag, it.slot) then
-      reason = "in equipment set"
-    elseif not ns.slotHasValue(it.bag, it.slot) then
-      reason = "vendor won't buy"
-    elseif ns.opts().compareAuction then
-      local auction = ns.getAuctionPrice(it.link, nil, guests)
-      local deValue = ns.isDisenchantable(it.link) and ns.getDisenchantValue(it.link, nil, guests) or nil
-      local verdict = ns.compareItem(it.price, auction, deValue)
-      if verdict == "auction" then
-        reason = "auction worth more (" .. ns.moneyString(ns.auctionNet(auction)) .. " net)"
-      elseif verdict == "disenchant" then
-        reason = "disenchant worth more (" .. ns.moneyString(ns.auctionNet(deValue)) .. " net)"
-      end
-    end
-    if reason then
-      leftover[#leftover + 1] = { link = it.link, reason = reason }
+  for _, it in ipairs(items) do
+    local reason = attemptOldGearSale(it, guests)
+    if reason == "sell failed" or reason == "still in bags" then
+      failed[#failed + 1] = it
+    elseif reason then
+      leftover[#leftover + 1] = leftoverEntry(it, reason)
     else
-      local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
-      local still = false
-      if type(C_Container.GetContainerItemLink) == "function" then
-        local okLink, now = pcall(C_Container.GetContainerItemLink, it.bag, it.slot)
-        still = okLink and now == it.link
-      end
-      if ok and not still then
-        n = n + 1
-        value = value + (it.price or 0)
-      else
-        leftover[#leftover + 1] = { link = it.link,
-          reason = (not ok) and "sell failed" or "still in bags" }
-        for j = i + 1, #items do
-          leftover[#leftover + 1] = { link = items[j].link, reason = "sale stopped" }
-        end
-        break
-      end
+      n = n + 1
+      value = value + (it.price or 0)
+    end
+  end
+  for _, it in ipairs(failed) do
+    local reason = attemptOldGearSale(it, guests)
+    if reason then
+      leftover[#leftover + 1] = leftoverEntry(it, reason)
+    else
+      n = n + 1
+      value = value + (it.price or 0)
     end
   end
   return n, value, leftover
@@ -962,7 +1046,8 @@ function ns.reportLeftover(leftover)
   local what = #leftover == 1 and "1 item" or #leftover .. " items"
   ns.say("couldn't sell " .. what .. ":")
   for _, it in ipairs(leftover) do
-    print("  " .. tostring(it.link) .. " (" .. it.reason .. ")")
+    print("  " .. tostring(it.link) .. " (" .. it.reason
+      .. (it.detail and ("; " .. it.detail) or "") .. ")")
   end
 end
 
@@ -1081,25 +1166,36 @@ function ns.repairNow()
 end
 
 function ns.onMerchantShow()
+  -- The session starts before anything else: the sale below runs inside
+  -- this dispatch, ahead of the merchant frame showing itself.
+  ns.merchant = true
   -- A visit whose close we missed (reload mid-visit) still gets its one
   -- line before the new visit starts counting.
   ns.flushVisit()
   ns.hookJunkButton()
-  -- Sell first: junk gold pays for the repair that follows.
   local o = ns.opts()
-  if o.autoSell then ns.autoSell() end
-  if o.sellConsumables then
-    local sale = ns.collectConsumableSale()
-    if #sale > 0 then
-      if o.autoSellConsumables then ns.sellConsumablesNow(sale)
-      else ns.reportConsumables(sale) end
-    end
+  if o.autoSell or o.sellConsumables or o.autoRepair then
+    -- Deferred a beat: clicks inside the SHOW dispatch silently fail
+    -- (the session is not ready yet) while a moment later they sell
+    -- fine. Sale first, so junk gold pays for the repair that follows.
+    ns.deferSale(function()
+      local live = ns.opts()
+      if live.autoSell then ns.autoSell() end
+      if live.sellConsumables then
+        local sale = ns.collectConsumableSale()
+        if #sale > 0 then
+          if live.autoSellConsumables then ns.sellConsumablesNow(sale)
+          else ns.reportConsumables(sale) end
+        end
+      end
+      if live.autoRepair then ns.repairNow() end
+    end)
   end
-  if o.autoRepair then ns.repairNow() end
 end
 
 -- Visit close: the one deferred line for everything sold since SHOW.
 function ns.onMerchantClosed()
+  ns.merchant = false
   ns.flushVisit()
 end
 
@@ -2571,6 +2667,7 @@ ns.frame:RegisterEvent("MERCHANT_SHOW")
 ns.frame:RegisterEvent("MERCHANT_CLOSED")
 ns.frame:RegisterEvent("BAG_UPDATE")
 ns.frame:RegisterEvent("QUEST_TURNED_IN")
+ns.frame:RegisterEvent("UI_ERROR_MESSAGE")
 ns.frame:RegisterEvent("ADDON_ACTION_BLOCKED")
 ns.frame:SetScript("OnEvent", function(_, event, arg1, arg2)
   if event == "ADDON_LOADED" and arg1 == name then
@@ -2594,6 +2691,9 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1, arg2)
     ns.refreshDeadWindow() -- and so does the delete list
   elseif event == "QUEST_TURNED_IN" then
     ns.refreshQuests() -- a new completion changes what counts as dead
+  elseif event == "UI_ERROR_MESSAGE" then
+    if ns.merchant then ns.lastVendorError = arg2 end -- the engine's
+    -- own verdict on a refused click, read by the leftover rows
   elseif event == "ADDON_ACTION_BLOCKED" then
     ns.onActionBlocked(arg1, arg2) -- our own taint blocks, named
   end
