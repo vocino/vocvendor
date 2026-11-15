@@ -3326,4 +3326,55 @@ do
     and w.printed[1] == "|cff66ccffVocVendor|r: macro slots are full, so VV Food was not created (free one up and run /vv use)")
 end
 
+-- 105. A Well Fed experience buff always wins the food slot, even
+-- with weaker numbers than spec-fit stat food: the sale keeps it,
+-- the macro and /vv use point at it.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().useMacros = true
+  w.unitStats = { [1] = 500, [2] = 100, [4] = 100 }
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local xp = use(w, { sub = SC.Fooddrink, price = 100,
+    desc = "use: well fed. experience gain increased by 10% for 1 hour. restores 1000 health over 20 sec. must remain seated." })
+  local strong = use(w, { sub = SC.Fooddrink, price = 200,
+    desc = "use: increases strength by 5000 for 1 hour. restores 8000 health over 20 sec. must remain seated." })
+  putStack(w, xp, 1)
+  putStack(w, strong, 1)
+  check("xp food outranks stronger stat food",
+    ns.consumableBetter(ns.consumablePower(xp), ns.consumablePower(strong)) == true)
+  check("xp food not outranked back",
+    ns.consumableBetter(ns.consumablePower(strong), ns.consumablePower(xp)) == false)
+  local sale = ns.collectConsumableSale()
+  check("sale keeps the xp food",
+    #sale == 1 and sale[1].link == strong)
+  check("macro points at the xp food",
+    ns.usePicks().food.link == xp)
+  w.env.SlashCmdList.VOCVENDOR("use")
+  check("use reports the xp food",
+    w.printed[2] == "  food: " .. xp)
+end
+
+-- 106. Well Fed without experience (a retail stat feast) earns no
+-- preference: numbers still decide.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  check("xp needs both words", ns.isXpFood("well fed. experience up") == true)
+  check("feast is not xp food",
+    ns.isXpFood("well fed. increases strength by 100.") == false)
+  check("experience alone is not xp food",
+    ns.isXpFood("gain experience.") == false)
+  check("missing desc is not xp food", ns.isXpFood(nil) == false)
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local feast = use(w, { sub = SC.Fooddrink,
+    desc = "use: well fed. increases strength by 100 for 1 hour." })
+  local plain = use(w, { sub = SC.Fooddrink,
+    desc = "use: increases strength by 200 for 1 hour." })
+  check("numbers still decide without experience",
+    ns.consumableBetter(ns.consumablePower(feast), ns.consumablePower(plain)) == false)
+end
+
 print("ok - " .. passed .. " checks passed")

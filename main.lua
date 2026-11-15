@@ -344,6 +344,16 @@ function ns.isSpecialConsumable(desc)
   return hasAny(desc, ns.CONSUMABLE_SPECIAL)
 end
 
+-- True when this description is a Well Fed experience buff: the XP
+-- food every food calculation prefers. Both words are needed: a
+-- stat feast is Well Fed without experience, and an experience
+-- grant without Well Fed is not food.
+function ns.isXpFood(desc)
+  if type(desc) ~= "string" then return false end
+  return desc:find("well fed", 1, true) ~= nil
+    and desc:find("experience", 1, true) ~= nil
+end
+
 -- Potion routing by what the description restores: health, mana, another
 -- resource, or a resistance. Health-and-mana both compete where the
 -- larger number is; anything else unrecognized keeps.
@@ -487,10 +497,14 @@ function ns.consumablePower(link, memo)
   return { num = ns.spellPower(desc), ilvl = ilvl, id = id or 0, desc = desc }
 end
 
--- True when a outranks b. Raw number, then item level, then the
--- player's own primary stat (a stronger off-spec item still beats a
--- weaker on-spec one), then the lower item ID for determinism.
+-- True when a outranks b. A Well Fed experience buff always wins
+-- (the XP food the food slot exists to keep); then raw number, then
+-- item level, then the player's own primary stat (a stronger
+-- off-spec item still beats a weaker on-spec one), then the lower
+-- item ID for determinism.
 function ns.consumableBetter(a, b)
+  local xa, xb = ns.isXpFood(a.desc), ns.isXpFood(b.desc)
+  if xa ~= xb then return xa end
   if a.num ~= b.num then return a.num > b.num end
   if a.ilvl ~= b.ilvl then return a.ilvl > b.ilvl end
   local stat = ns.playerStatWord()
