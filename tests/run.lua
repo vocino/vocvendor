@@ -88,7 +88,8 @@ local function loadAddon(world)
     GetItemInfo = function(link)
       if world.uncached[link] then return nil end
       return link, link, world.rarities[link], world.levels[link],
-        world.minLevels[link], nil, nil, world.maxStacks[link], world.slots[link], nil,
+        world.minLevels[link], nil, nil, world.maxStacks[link], world.slots[link],
+        world.textures[link],
         world.prices[link], world.classIDs[link], world.subclassIDs[link],
         world.bindTypes[link], world.expansions[link], world.setIDs[link], nil, nil
     end,
@@ -203,6 +204,44 @@ local function loadAddon(world)
     return s[1], s[2]
   end
   g.UnitStat = function(_, i) return (world.unitStats or {})[i] end
+  g.UnitLevel = function() return world.playerLevel end
+  g.UnitPowerMax = function() return world.playerMana end
+  -- Macro globals (verified against Blizzard's own MacroUI on both
+  -- branches): world.macros[name] = { index, icon, body, perChar }.
+  -- world.noMacros removes them all, testing the presence gate.
+  g.GetMacroInfo = function(id)
+    for name, m in pairs(world.macros) do
+      if m.index == id then return name, m.icon, m.body end
+    end
+    return nil
+  end
+  g.GetNumMacros = function()
+    local n = 0
+    for _ in pairs(world.macros) do n = n + 1 end
+    return 0, n
+  end
+  g.CreateMacro = function(name, icon, body, perChar)
+    world.macroSeq = world.macroSeq + 1
+    world.macros[name] =
+      { index = world.macroSeq, icon = icon, body = body, perChar = perChar }
+    return world.macroSeq
+  end
+  g.EditMacro = function(index, name, icon, body)
+    for old, m in pairs(world.macros) do
+      if m.index == index then
+        world.macros[old] = nil
+        world.macros[name] =
+          { index = index, icon = icon, body = body, perChar = m.perChar }
+        world.macroEdits = world.macroEdits + 1
+        return index
+      end
+    end
+    return nil
+  end
+  if world.noMacros then
+    g.GetMacroInfo, g.GetNumMacros = nil, nil
+    g.CreateMacro, g.EditMacro = nil, nil
+  end
   -- world.withTimer queues deferred visit work instead of running it
   -- now (world.timerFails makes the timer API error, testing the
   -- immediate fallback); fire it with world.deferred in test order.
@@ -321,6 +360,14 @@ local function loadAddon(world)
       GetText = function() return (world.tipLines[world.tipLink] or {})[i] end,
     }
   end
+  -- world.withMacroFrame provides the macro window (open when
+  -- world.macroFrameOpen): the parked-update hook runs against it.
+  if world.withMacroFrame then
+    local mf = makeFrame("Frame", "MacroFrame")
+    mf.shown = world.macroFrameOpen == true
+    g.MacroFrame = mf
+    world.macroFrame = mf
+  end
   g.StaticPopupDialogs = {}
   g.StaticPopup_Show = function(which, a, b, data)
     world.popups[#world.popups + 1] = { which = which, a = a, b = b, data = data }
@@ -416,6 +463,8 @@ local function newWorld()
     subclassIDs = {}, rarities = {}, prices = {}, bindTypes = {},
     setIDs = {}, itemIDs = {}, uncached = {}, warbound = {}, equipSets = {}, expansions = {},
     equipped = {}, printed = {}, frames = {}, gametip = { lines = {}, colors = {} },
+    macros = {}, macroSeq = 0, macroEdits = 0, playerLevel = 60, playerMana = 100,
+    textures = {},
     money = 100000, junkCount = 0, junkValue = 0, junkSold = false,
     sold = {}, repairs = {}, popups = {},
     canRepair = true, repairCost = 0, repairCan = false,
@@ -492,6 +541,7 @@ local function use(w, o)
   w.prices[link] = o.price or 100
   w.expansions[link] = o.expansion or 10
   w.maxStacks[link] = o.max or 20
+  w.textures[link] = 136000 + useSeq
   if not o.noSpell then
     local sid = 9000 + useSeq
     w.itemSpells[link] = { "UseEffect" .. useSeq, sid }
@@ -525,6 +575,7 @@ do
     o.sellLegion == false and o.sellClassic == false and o.sellMidnight == false)
   check("default keep disenchantable", o.keepDisenchantable == true)
   check("default compareAuction", o.compareAuction == true)
+  check("default use macros off", o.useMacros == false)
 end
 
 -- 1b. An out-of-range gap (hand-edited SavedVariables) resets to the
@@ -1010,7 +1061,9 @@ do
   check("autoSell setting", w.env.Settings and w.settingsReg["VocVendor_autoSell"] ~= nil)
   check("gap slider", w.settingsSliders == 1)
   check("gap default", w.settingsReg["VocVendor_oldGearIlvlGap"].default == 30)
-  check("checkboxes", w.settingsChecks == 23)
+  check("checkboxes", w.settingsChecks == 24)
+  check("use macros setting", w.settingsReg["VocVendor_useMacros"] ~= nil)
+  check("use macros default off", w.settingsReg["VocVendor_useMacros"].default == false)
   check("legion setting", w.settingsReg["VocVendor_sellLegion"] ~= nil)
   check("legion default off", w.settingsReg["VocVendor_sellLegion"].default == false)
   check("midnight current label",
@@ -2614,11 +2667,12 @@ do
   check("predicate follows the parent off", gateOf.oldGearIlvlGap.pred() == false)
   ns.opts().junkOldGear = true
   check("predicate follows the parent on", gateOf.oldGearIlvlGap.pred() == true)
-  check("four headers", #w.settingsHeaders == 4)
+  check("five headers", #w.settingsHeaders == 5)
   check("selling heads the panel", w.settingsHeaders[1].header == "Selling")
-  check("repair sectioned", w.settingsHeaders[2].header == "Repair")
-  check("announcements sectioned", w.settingsHeaders[3].header == "Announcements")
-  check("expansions sectioned", w.settingsHeaders[4].header == "Expansions")
+  check("using groups the macros", w.settingsHeaders[2].header == "Using")
+  check("repair sectioned", w.settingsHeaders[3].header == "Repair")
+  check("announcements sectioned", w.settingsHeaders[4].header == "Announcements")
+  check("expansions sectioned", w.settingsHeaders[5].header == "Expansions")
 end
 
 -- 85. Onboarding: a returning player auto-enables safe settings with one
@@ -2634,6 +2688,7 @@ do
   check("compare auto-on", o.compareAuction == true)
   check("denied setting stays off", o.junkOldGear == false)
   check("denied expansion stays off", o.sellLegion == false)
+  check("use macros stay off", o.useMacros == false)
   local announced = {}
   for _, line in ipairs(w.printed) do announced[line] = true end
   check("announced once per setting", #w.printed == 6
@@ -2837,7 +2892,7 @@ end
 -- 92. /vv why names the verdict per gear piece.
 do
   local w = newWorld()
-  local ns = loadAddon(w)
+  loadAddon(w)
   clientLoaded(w)
   w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
   local old = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
@@ -2857,7 +2912,7 @@ do
     w.printed[3] == "|cff66ccffVocVendor|r: within 30 ilvls of 400 equipped: " .. near)
   -- No item level and no guest score: the verdict says so.
   local v = newWorld()
-  local nsv = loadAddon(v)
+  loadAddon(v)
   clientLoaded(v)
   v.equipped[1] = gear(v, { slot = "INVTYPE_HEAD", level = 400 })
   local unranked = gear(v, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
@@ -3061,6 +3116,214 @@ do
     w.frame.onEvent(nil, "UI_ERROR_MESSAGE", 1, "ERR_VENDOR_DOESNT_BUY")
     return ns.lastVendorError == "SOME_OTHER_ERROR"
   end)())
+end
+
+-- 98. Use macros stay off until opted in: no macros on bag changes,
+-- and /vv use reports the picks with a toggle hint.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  check("use macros manual opt-in", ns.MANUAL_OPT_IN.useMacros == true)
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local bread = use(w, { sub = SC.Fooddrink,
+    desc = "use: restores 30000 health over 27 sec. must remain seated." })
+  putStack(w, bread, 1)
+  w.frame.onEvent(nil, "PLAYER_LOGIN")
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("disabled creates nothing", next(w.macros) == nil)
+  w.env.SlashCmdList.VOCVENDOR("use")
+  check("use reports the ranks",
+    w.printed[1] == "|cff66ccffVocVendor|r: best consumables:")
+  check("use names the winner", w.printed[2] == "  food: " .. bread)
+  check("use hints at the toggle",
+    w.printed[#w.printed]
+      == "  macros off (Settings > AddOns > VocVendor to maintain them)")
+end
+
+-- 99. Enabling points one macro per quick-use slot at the sell
+-- winner; restocks rewrite, unchanged winners write nothing.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().useMacros = true
+  w.unitStats = { [1] = 500, [2] = 100, [4] = 100 }
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local weakFood = use(w, { sub = SC.Fooddrink, price = 50,
+    desc = "use: restores 10000 health over 27 sec. must remain seated." })
+  local strongFood = use(w, { sub = SC.Fooddrink, price = 200,
+    desc = "use: restores 50000 health over 27 sec. must remain seated." })
+  local weakPot = use(w, { sub = SC.Potion, price = 50,
+    desc = "use: restores 20000 health." })
+  local strongPot = use(w, { sub = SC.Potion, price = 200,
+    desc = "use: restores 90000 health." })
+  putStack(w, weakFood, 1)
+  putStack(w, strongFood, 1)
+  putStack(w, weakPot, 1)
+  putStack(w, strongPot, 1)
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("food macro points at the winner",
+    w.macros["VV Food"]
+      and w.macros["VV Food"].body
+        == "#showtooltip\n/use item:" .. w.itemIDs[strongFood])
+  check("health macro points at the winner",
+    w.macros["VV Health"]
+      and w.macros["VV Health"].body
+        == "#showtooltip\n/use item:" .. w.itemIDs[strongPot])
+  check("character macros", w.macros["VV Food"].perChar == true)
+  check("empty slots get no macros",
+    w.macros["VV Drink"] == nil and w.macros["VV Mana"] == nil
+      and w.macros["VV Bandage"] == nil)
+  local bestFood = use(w, { sub = SC.Fooddrink, price = 300,
+    desc = "use: restores 80000 health over 27 sec. must remain seated." })
+  putStack(w, bestFood, 1)
+  local editsBefore = w.macroEdits
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("restock rewrites the macro",
+    w.macros["VV Food"].body
+      == "#showtooltip\n/use item:" .. w.itemIDs[bestFood])
+  check("rewrite counted", w.macroEdits == editsBefore + 1)
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("unchanged winner writes nothing",
+    w.macroEdits == editsBefore + 1)
+end
+
+-- 100. Conjured (unsellable) food is a first-class pick for use.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().useMacros = true
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local conjured = use(w, { sub = SC.Fooddrink, price = 0,
+    desc = "use: restores 40000 health over 27 sec. must remain seated." })
+  putStack(w, conjured, 1)
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("zero-price winner gets a macro",
+    w.macros["VV Food"]
+      and w.macros["VV Food"].body
+        == "#showtooltip\n/use item:" .. w.itemIDs[conjured])
+  check("unsellable never reaches the sale",
+    #ns.collectConsumableSale() == 0)
+end
+
+-- 101. A winner above the character's level is skipped; the usable
+-- runner-up wins instead.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().useMacros = true
+  w.playerLevel = 10
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local high = use(w, { sub = SC.Fooddrink, minLevel = 60,
+    desc = "use: restores 90000 health over 27 sec. must remain seated." })
+  local low = use(w, { sub = SC.Fooddrink, minLevel = 5,
+    desc = "use: restores 20000 health over 27 sec. must remain seated." })
+  putStack(w, high, 1)
+  putStack(w, low, 1)
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("unusable winner skipped",
+    w.macros["VV Food"]
+      and w.macros["VV Food"].body
+        == "#showtooltip\n/use item:" .. w.itemIDs[low])
+  w.env.SlashCmdList.VOCVENDOR("use")
+  check("use reports the usable winner",
+    w.printed[2] == "  food: " .. low)
+end
+
+-- 102. Characters without mana keep no drink or mana macros.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().useMacros = true
+  w.playerMana = 0
+  local SC = w.env.Enum.ItemConsumableSubclass
+  putStack(w, use(w, { sub = SC.Fooddrink,
+    desc = "use: restores 50000 mana over 27 sec. must remain seated." }), 1)
+  putStack(w, use(w, { sub = SC.Potion,
+    desc = "use: restores 40000 mana." }), 1)
+  putStack(w, use(w, { sub = SC.Fooddrink,
+    desc = "use: restores 30000 health over 27 sec. must remain seated." }), 1)
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("manaless keeps food", w.macros["VV Food"] ~= nil)
+  check("manaless skips drink", w.macros["VV Drink"] == nil)
+  check("manaless skips mana", w.macros["VV Mana"] == nil)
+  local m = newWorld()
+  local nsm = loadAddon(m)
+  clientLoaded(m)
+  nsm.opts().useMacros = true
+  local SM = m.env.Enum.ItemConsumableSubclass
+  putStack(m, use(m, { sub = SM.Fooddrink,
+    desc = "use: restores 50000 mana over 27 sec. must remain seated." }), 1)
+  putStack(m, use(m, { sub = SM.Potion,
+    desc = "use: restores 40000 mana." }), 1)
+  m.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("mana keeps drink", m.macros["VV Drink"] ~= nil)
+  check("mana keeps mana", m.macros["VV Mana"] ~= nil)
+end
+
+-- 103. Combat and the open macro window park the update; combat end
+-- and window close flush it. Missing macro APIs stay silent.
+do
+  local w = newWorld()
+  w.withMacroFrame = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().useMacros = true
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local plain = use(w, { sub = SC.Fooddrink,
+    desc = "use: restores 30000 health over 27 sec. must remain seated." })
+  putStack(w, plain, 1)
+  w.combat = true
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("combat parks the update",
+    next(w.macros) == nil and ns.usePending == true)
+  w.combat = false
+  w.frame.onEvent(nil, "PLAYER_REGEN_ENABLED")
+  check("combat end flushes", w.macros["VV Food"] ~= nil)
+  local better = use(w, { sub = SC.Fooddrink,
+    desc = "use: restores 80000 health over 27 sec. must remain seated." })
+  putStack(w, better, 1)
+  w.macroFrame:Show()
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("open window parks",
+    w.macros["VV Food"].body
+      == "#showtooltip\n/use item:" .. w.itemIDs[plain]
+      and ns.usePending == true)
+  w.macroFrame:Hide()
+  check("window close flushes",
+    w.macros["VV Food"].body
+      == "#showtooltip\n/use item:" .. w.itemIDs[better])
+  local n = newWorld()
+  n.noMacros = true
+  local nsn = loadAddon(n)
+  clientLoaded(n)
+  nsn.opts().useMacros = true
+  putStack(n, use(n, { sub = SC.Fooddrink,
+    desc = "use: restores 30000 health over 27 sec. must remain seated." }), 1)
+  n.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("missing macro APIs stay silent",
+    next(n.macros) == nil and #n.printed == 0)
+end
+
+-- 104. Full character slots warn once and skip creation.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().useMacros = true
+  for i = 1, 30 do w.env.CreateMacro("VV Old" .. i, 135268, "#showtooltip", true) end
+  local SC = w.env.Enum.ItemConsumableSubclass
+  putStack(w, use(w, { sub = SC.Fooddrink,
+    desc = "use: restores 30000 health over 27 sec. must remain seated." }), 1)
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("full slots skip creation", w.macros["VV Food"] == nil)
+  check("full slots warn once", #w.printed == 1
+    and w.printed[1] == "|cff66ccffVocVendor|r: macro slots are full, so VV Food was not created (free one up and run /vv use)")
 end
 
 print("ok - " .. passed .. " checks passed")

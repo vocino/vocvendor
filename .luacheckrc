@@ -29,6 +29,7 @@ read_globals = {
   "_G",
   "C_Container", "C_Item", "C_MerchantFrame", "C_Spell", "C_SpellBook", -- bags, prices, junk sale, disenchant gate (live + forever)
   "C_AddOns", -- rival detection via IsAddOnLoaded (live + forever)
+  "C_Timer", -- deferred visit work via After, presence-gated with an immediate fallback
   "C_ToyBox", "C_PetJournal", "C_TransmogCollection", -- collection keep gates (UI-source ok/ok; calls presence-gated)
   "C_QuestLog", -- dead-quest title set (QuestLogDocumentation, live + forever)
   "DeleteCursorItem", -- bare C global, HasRestrictions: confirm click only
@@ -38,6 +39,9 @@ read_globals = {
   "InCombatLockdown", -- combat guards on every click path (live + forever)
   "IsMouseButtonDown", "UIParent", "UISpecialFrames",
   "MerchantFrame", "MerchantSellAllJunkButton", -- native Sell Junk hook (MerchantFrame.xml, live + forever)
+  "MacroFrame", -- Blizzard_MacroUI owns it on both branches; the OnHide hook and IsShown are presence-gated
+  "GetMacroInfo", "GetNumMacros", "CreateMacro", "EditMacro", -- bare macro writes, called by Blizzard_MacroUI on both branches
+  "UnitLevel", "UnitPowerMax", -- winner usability + mana gates (UnitDocumentation, both branches)
   "NUM_BAG_SLOTS", -- bag 0 plus worn bags, presence-gated
   "CanGuildBankRepair", "CanMerchantRepair", "GetRepairAllCost",
   "RepairAllItems", -- mirror of the merchant repair buttons (live + forever)

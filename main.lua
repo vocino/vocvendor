@@ -115,6 +115,7 @@ local defaults = {
   compareAuction = true,  -- skip vendor sale when auction nets more
   sellConsumables = true, -- keep one stack of the strongest per category
   autoSellConsumables = false, -- ...automatically, or behind a confirm list
+  useMacros = false, -- keep VV macros pointed at the strongest per quick-use slot
   protectedItems = {},    -- item IDs that never sell (/vv protect)
   newSeen = {},           -- per-feature seen stamps for New tags (/vv dismiss-new)
 }
@@ -136,7 +137,7 @@ ns.NEW_TAG_DAYS = 7
 ns.NEW_TAG_WINDOW = 7 * 24 * 60 * 60
 ns.MANUAL_OPT_IN = {
   junkOldGear = true, oldGearBoE = true, oldGearWarbound = true,
-  autoSellConsumables = true,
+  autoSellConsumables = true, useMacros = true,
 }
 for _, e in ipairs(ns.EXPANSIONS) do ns.MANUAL_OPT_IN["sell" .. e.key] = true end
 
@@ -877,6 +878,235 @@ function ns.refreshConsumablePopup()
   if ns.opts().sellConsumables then return end
   if type(StaticPopup_Hide) == "function" then
     pcall(StaticPopup_Hide, "VOCVENDOR_SELL_CONSUMABLES")
+  end
+end
+
+-- ======= Use macros =======
+-- The sell logic already crowns one winner per buff slot
+-- (groupConsumables + rankCategory); the use macros point at those
+-- winners for the five quick-use slots, so the kept stack and the
+-- macro always agree. Collection differs on purpose: the sale wants
+-- vendorable stacks (a price), use wants usable ones (your level or
+-- below, quest and collectible keeps still excluded, protect still
+-- holds). Conjured items have no price and never sell, but they are
+-- first-class picks here. Bandages you lack the skill for are only
+-- gated by level: the skill check lives in tooltip red text, which
+-- this addon never reads.
+ns.USE_MACROS = {
+  { key = "food", name = "VV Food", label = "food" },
+  { key = "drink", name = "VV Drink", label = "drink" },
+  { key = "healpotion", name = "VV Health", label = "health potion" },
+  { key = "manapotion", name = "VV Mana", label = "mana potion" },
+  { key = "bandage", name = "VV Bandage", label = "bandage" },
+}
+-- 120 account + 30 character slots (MacroConstantsDocumentation,
+-- same values on both branches).
+ns.MACRO_SLOTS = 150
+ns.usePending = false -- a bag change arrived while macros could not edit
+ns.useIncomplete = false -- a use-slot item ranked without spell data
+ns.macroHooked = false -- the MacroFrame OnHide hook, installed once
+ns.macroFullWarned = false -- the macro-slots-full line, said once
+
+-- True when the character has a mana bar. Characters without mana
+-- keep no drink or mana macros. Unknown API or failed read keeps
+-- nothing: pointing at a mana item you cannot use is worse than none.
+function ns.hasMana()
+  if type(UnitPowerMax) ~= "function" then return false end
+  -- 0 is mana (PowerTypeConstantsDocumentation; Enum.PowerType.Mana
+  -- when the client names it, as in EasyConsumables).
+  local manaType = 0
+  if type(Enum) == "table" and type(Enum.PowerType) == "table"
+    and type(Enum.PowerType.Mana) == "number" then
+    manaType = Enum.PowerType.Mana
+  end
+  local ok, max = pcall(UnitPowerMax, "player", manaType)
+  return ok and (tonumber(max) or 0) > 0
+end
+
+function ns.playerLevel()
+  if type(UnitLevel) ~= "function" then return nil end
+  local ok, lvl = pcall(UnitLevel, "player")
+  if ok and type(lvl) == "number" then return lvl end
+  return nil
+end
+
+-- True when the character may use this link: its required level is
+-- known and met, or unknowable. An unknown minimum never blocks.
+function ns.linkUsable(link)
+  if type(C_Item) ~= "table"
+    or type(C_Item.GetItemInfo) ~= "function" then
+    return true
+  end
+  local r = { pcall(C_Item.GetItemInfo, link) }
+  if not r[1] or r[2] == nil then return true end
+  local minLevel = r[6] -- 5th return
+  local level = ns.playerLevel()
+  if type(minLevel) == "number" and type(level) == "number"
+    and minLevel > level then
+    return false
+  end
+  return true
+end
+
+-- Confidently placed, usable bag consumables for the five quick-use
+-- slots. Shares the category router and the ranker with the sale;
+-- only the collection guards differ (see above).
+function ns.groupUsables(descs)
+  local memo = {}
+  local byCat = {}
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      local link = C_Container.GetContainerItemLink(bag, slot)
+      if link and not ns.isProtected(link) and not ns.questKeeps(link)
+        and not ns.isUncollectedCollectible(link, memo)
+        and ns.linkUsable(link) then
+        local cat = ns.consumableCategory(link, descs)
+        if cat == "food" or cat == "drink" or cat == "healpotion"
+          or cat == "manapotion" or cat == "bandage" then
+          if not byCat[cat] then byCat[cat] = {} end
+          byCat[cat][#byCat[cat] + 1] = { link = link }
+        end
+      end
+    end
+  end
+  return byCat
+end
+
+-- One winning pick per quick-use slot: link, numeric item ID, and
+-- icon texture for the macro. Items the client cannot rank yet mark
+-- the scan incomplete, so item data arriving later re-ranks.
+function ns.usePicks()
+  local descs = {}
+  local byCat = ns.groupUsables(descs)
+  local picks = {}
+  ns.useIncomplete = false
+  for _, def in ipairs(ns.USE_MACROS) do
+    local items = byCat[def.key]
+    local ranked = items and ns.rankCategory(items, descs) or nil
+    if ranked then
+      for _, it in ipairs(items) do
+        if it.power == nil then ns.useIncomplete = true break end
+      end
+      local id = ns.itemID(ranked.winner.link)
+      if id then
+        local r = { pcall(C_Item.GetItemInfo, ranked.winner.link) }
+        picks[def.key] = { link = ranked.winner.link, id = id,
+          texture = r[11] } -- 10th return
+      end
+    end
+  end
+  return picks
+end
+
+function ns.useMacroBody(itemID)
+  return "#showtooltip\n/use item:" .. tostring(itemID)
+end
+
+-- Macro slot holding this name, or 0. Blizzard's own MacroUI reads
+-- macros the same way (GetMacroInfo by slot on both branches); the
+-- scan stays inside the documented 150 slots.
+function ns.findMacro(macroName)
+  if type(GetMacroInfo) ~= "function" then return 0 end
+  for id = 1, ns.MACRO_SLOTS do
+    local ok, found = pcall(GetMacroInfo, id)
+    if ok and found == macroName then return id end
+  end
+  return 0
+end
+
+-- Macros cannot edit in combat, and Blizzard's macro window saves
+-- over our edits when it closes, so both park the update instead.
+function ns.canEditMacros()
+  if type(InCombatLockdown) == "function" and InCombatLockdown() then
+    return false
+  end
+  if type(MacroFrame) == "table"
+    and type(MacroFrame.IsShown) == "function" then
+    local ok, shown = pcall(MacroFrame.IsShown, MacroFrame)
+    if ok and shown then return false end
+  end
+  return true
+end
+
+-- Re-run a parked update when the macro window closes. Installed
+-- once, presence-gated: windowless clients never park here.
+function ns.hookMacroFrame()
+  if ns.macroHooked then return end
+  if type(MacroFrame) ~= "table" then return end
+  if type(MacroFrame.HookScript) ~= "function" then return end
+  ns.macroHooked = true
+  pcall(MacroFrame.HookScript, MacroFrame, "OnHide", function()
+    if ns.usePending then ns.updateUseMacros() end
+  end)
+end
+
+-- One macro write: create it once (character-specific, like
+-- EasyConsumables), then rewrite only when the body changed. A
+-- missing icon fails closed: no icon, no macro.
+function ns.writeUseMacro(def, pick)
+  if pick.texture == nil then return end
+  local idx = ns.findMacro(def.name)
+  local body = ns.useMacroBody(pick.id)
+  if idx == 0 then
+    if type(GetNumMacros) ~= "function" then return end
+    local okN, _, nChar = pcall(GetNumMacros)
+    if not okN then return end
+    -- 30 character slots (MacroConstantsDocumentation, both branches).
+    if (tonumber(nChar) or 0) >= 30 then
+      if not ns.macroFullWarned then
+        ns.macroFullWarned = true
+        ns.say("macro slots are full, so " .. def.name
+          .. " was not created (free one up and run /vv use)")
+      end
+      return
+    end
+    pcall(CreateMacro, def.name, pick.texture, body, true)
+  else
+    local okI, _, _, current = pcall(GetMacroInfo, idx)
+    if okI and current ~= body then
+      pcall(EditMacro, idx, def.name, pick.texture, body)
+    end
+  end
+end
+
+-- Point every maintained macro at its current winner. Reads run any
+-- time; writes wait for combat and the macro window to clear.
+function ns.updateUseMacros()
+  if not ns.opts().useMacros then return end
+  if type(GetMacroInfo) ~= "function"
+    or type(CreateMacro) ~= "function"
+    or type(EditMacro) ~= "function"
+    or type(GetNumMacros) ~= "function" then
+    return
+  end
+  if not ns.canEditMacros() then
+    ns.usePending = true
+    return
+  end
+  ns.usePending = false
+  local picks = ns.usePicks()
+  for _, def in ipairs(ns.USE_MACROS) do
+    local pick = picks[def.key]
+    local needsMana = def.key == "drink" or def.key == "manapotion"
+    if pick and (not needsMana or ns.hasMana()) then
+      ns.writeUseMacro(def, pick)
+    end
+  end
+end
+
+-- The /vv use readout: one line per slot naming the winner, plus a
+-- hint when the macros are off. No windows: facts for the chat line.
+function ns.reportUsePicks(picks, maintained)
+  ns.play("open") -- the picks are the readout
+  ns.say("best consumables:")
+  for _, def in ipairs(ns.USE_MACROS) do
+    local p = picks and picks[def.key]
+    if p then print("  " .. def.label .. ": " .. p.link)
+    else print("  " .. def.label .. ": none in bags") end
+  end
+  if not maintained then
+    print("  macros off (Settings > AddOns > VocVendor to maintain them)")
   end
 end
 
@@ -2409,9 +2639,9 @@ function ns.ensureSettings()
   -- panel builds exactly as before, one flat list.
   local canHead = type(Settings.RegisterInitializer) == "function"
     and type(CreateSettingsListSectionHeaderInitializer) == "function"
-  local function header(name, tooltip)
+  local function header(title, tooltip)
     if not canHead then return end
-    local ok, init = pcall(CreateSettingsListSectionHeaderInitializer, name, tooltip)
+    local ok, init = pcall(CreateSettingsListSectionHeaderInitializer, title, tooltip)
     if ok and init ~= nil then
       pcall(Settings.RegisterInitializer, category, init)
     end
@@ -2472,6 +2702,11 @@ function ns.ensureSettings()
     "Skip vendor sale when auction data says the auction house or disenchanting nets more. Needs Auctionator, TradeSkillMaster, or Oribos Exchange.")
   check("keepDisenchantable", "Keep disenchantable gear",
     "Enchanters only: keep gear you could disenchant out of junk sales. Off sells it with junk like any other old gear.")
+  header("Using",
+    "Use macros point at the strongest consumable in each quick-use slot.")
+  check("useMacros", "Maintain use macros",
+    "Keep VV Food, VV Drink, VV Health, VV Mana and VV Bandage pointed at the strongest consumable in each slot. They update when your bags change.",
+    ns.updateUseMacros)
   header("Repair", "Repairs at vendors that repair, guild funds first when allowed.")
   local repairInit = check("autoRepair", "Auto-repair",
     "Repair all gear automatically at vendors that repair.")
@@ -2577,6 +2812,7 @@ ns.HELP = {
   "/vv disenchant    open the disenchant list",
   "/vv destroy       delete dead expansion items (confirms each)",
   "/vv consume       sell losing consumables",
+  "/vv use           use best consumables (refresh macros)",
   "/vv protect       keep an item out of every sale",
   "/vv diag          show consumable ranks",
   "/vv why           explain each gear verdict",
@@ -2641,6 +2877,10 @@ SlashCmdList.VOCVENDOR = function(msg)
     else
       ns.reportConsumables(sale)
     end
+  elseif msg == "use" then
+    local maintained = ns.opts().useMacros
+    if maintained then ns.updateUseMacros() end
+    ns.reportUsePicks(ns.usePicks(), maintained)
   elseif msg == "protect" then
     ns.listProtected()
   elseif msg:sub(1, 8) == "protect " then
@@ -2666,6 +2906,11 @@ ns.frame:RegisterEvent("PLAYER_LOGIN")
 ns.frame:RegisterEvent("MERCHANT_SHOW")
 ns.frame:RegisterEvent("MERCHANT_CLOSED")
 ns.frame:RegisterEvent("BAG_UPDATE")
+ns.frame:RegisterEvent("BAG_UPDATE_DELAYED")
+ns.frame:RegisterEvent("PLAYER_REGEN_ENABLED")
+ns.frame:RegisterEvent("PLAYER_LEVEL_UP")
+ns.frame:RegisterEvent("SKILL_LINES_CHANGED")
+ns.frame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 ns.frame:RegisterEvent("QUEST_TURNED_IN")
 ns.frame:RegisterEvent("UI_ERROR_MESSAGE")
 ns.frame:RegisterEvent("ADDON_ACTION_BLOCKED")
@@ -2677,11 +2922,15 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1, arg2)
     ns.db = VocVendorDB
     ns.ensureSettings()
     ns.checkRivals() -- a same-job addon loaded before us stands us down
+    ns.hookMacroFrame() -- the macro window may already be up
   elseif event == "ADDON_LOADED" then
     ns.checkRivals() -- a same-job addon loaded after us does the same
+    ns.hookMacroFrame() -- Blizzard_MacroUI loads on demand
   elseif event == "PLAYER_LOGIN" then
     ns.ensureSettings() -- in case Settings wasn't up at ADDON_LOADED
     ns.checkRivals()
+    ns.hookMacroFrame()
+    ns.updateUseMacros() -- bags are settled: point macros at winners
   elseif event == "MERCHANT_SHOW" then
     ns.onMerchantShow()
   elseif event == "MERCHANT_CLOSED" then
@@ -2689,6 +2938,14 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1, arg2)
   elseif event == "BAG_UPDATE" then
     ns.refreshDEWindow() -- the disenchant list tracks the bags live
     ns.refreshDeadWindow() -- and so does the delete list
+  elseif event == "BAG_UPDATE_DELAYED" then
+    ns.updateUseMacros() -- winning stacks changed: re-point the macros
+  elseif event == "PLAYER_REGEN_ENABLED" then
+    if ns.usePending then ns.updateUseMacros() end -- combat parked one
+  elseif event == "PLAYER_LEVEL_UP" or event == "SKILL_LINES_CHANGED" then
+    ns.updateUseMacros() -- usability may have changed
+  elseif event == "GET_ITEM_INFO_RECEIVED" then
+    if ns.useIncomplete then ns.updateUseMacros() end -- data arrived
   elseif event == "QUEST_TURNED_IN" then
     ns.refreshQuests() -- a new completion changes what counts as dead
   elseif event == "UI_ERROR_MESSAGE" then
