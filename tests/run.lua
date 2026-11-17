@@ -204,6 +204,9 @@ local function loadAddon(world)
     SetEnabled = function(_, e) world.buttonEnabled = e end,
   }
   g.hooksecurefunc = function(n, fn) world.hooks[n] = fn end
+  -- Blizzard's own refresh; the search post-hooks it (nil it to test
+  -- the missing-update gate).
+  g.MerchantFrame_Update = function() end
   g.UIParent = {}
   g.UISpecialFrames = {}
   g.InCombatLockdown = function() return world.combat == true end
@@ -3501,6 +3504,14 @@ do
   check("no frame builds no box", ns.merchantSearchBox == nil)
   check("no frame installs no hook", ns.merchantSearchHooked == false)
   check("apply without frame stays silent", ns.applyMerchantSearch() == nil)
+end
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  w.env.MerchantFrame_Update = nil
+  clientLoaded(w)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("no update installs no hook", ns.merchantSearchHooked == false)
 end
 do
   local w = newWorld()

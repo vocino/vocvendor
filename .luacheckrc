@@ -40,6 +40,7 @@ read_globals = {
   "IsMouseButtonDown", "UIParent", "UISpecialFrames",
   "MerchantFrame", "MerchantSellAllJunkButton", -- native Sell Junk hook (MerchantFrame.xml, live + forever)
   "GetMerchantItemInfo", "MERCHANT_ITEMS_PER_PAGE", -- merchant search (MerchantFrame.lua, Vanilla + Mainline)
+  "MerchantFrame_Update", -- refresh post-hook for the merchant search
   "MacroFrame", -- Blizzard_MacroUI owns it on both branches; the OnHide hook and IsShown are presence-gated
   "GetMacroInfo", "GetNumMacros", "CreateMacro", "EditMacro", -- bare macro writes, called by Blizzard_MacroUI on both branches
   "UnitLevel", "UnitPowerMax", -- winner usability + mana gates (UnitDocumentation, both branches)

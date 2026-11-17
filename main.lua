@@ -1708,8 +1708,9 @@ function ns.hookMerchantSearch()
   if ns.merchantSearchHooked then return end
   if type(hooksecurefunc) ~= "function" then return end
   if type(MerchantFrame) ~= "table" then return end
-  local ok = pcall(hooksecurefunc, "MerchantFrame_Update", ns.applyMerchantSearch)
-  if ok then ns.merchantSearchHooked = true end
+  if type(MerchantFrame_Update) ~= "function" then return end
+  hooksecurefunc("MerchantFrame_Update", ns.applyMerchantSearch)
+  ns.merchantSearchHooked = true
 end
 
 -- Delete confirm: one dead item per dialog, named by link. The Accept
