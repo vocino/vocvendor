@@ -21,7 +21,9 @@ guild allows it), and one chat line reports the take at close. Gear kept for
 disenchanting opens a click-to-disenchant list instead of a chat line:
 click an item to disenchant it. The native Sell
 Junk button keeps working and gains your definition: with old gear in
-it, the click lists the items and asks before selling. The addon
+it, the click lists the items and asks before selling. The merchant window
+grows a search box that dims goods that do not match as you type, like the
+bag search. The addon
 compartment on the minimap opens the settings, or the disenchant list
 while kept gear waits.
 
@@ -102,7 +104,7 @@ disenchants that bag slot, and the list tracks the bags until empty. Dead items 
 
 ## What's inside
 
-- `main.lua`: the whole addon: the junk definition, auto-sell, auto-repair, the Sell Junk hook, the disenchant and delete windows, consumable keep-winner-sell-rest, use macros, settings, slash
+- `main.lua`: the whole addon: the junk definition, auto-sell, auto-repair, the Sell Junk hook, the merchant search box, the disenchant and delete windows, consumable keep-winner-sell-rest, use macros, settings, slash
 - `VocVendor.toc` / `VocVendor_Camelot.toc`: metadata for Retail and the Forever client
 - `tests/run.lua`: stub-harness regression tests, no WoW client needed
 

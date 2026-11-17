@@ -1417,6 +1417,9 @@ function ns.onMerchantShow()
   -- line before the new visit starts counting.
   ns.flushVisit()
   ns.hookJunkButton()
+  ns.ensureMerchantSearch() -- the goods search box, built once
+  ns.hookMerchantSearch() -- re-apply the dim after every refresh
+  ns.applyMerchantSearch() -- names may still be arriving; the hook re-applies
   local o = ns.opts()
   if o.autoSell or o.sellConsumables or o.autoRepair then
     -- Deferred a beat: clicks inside the SHOW dispatch silently fail
@@ -1566,6 +1569,147 @@ StaticPopupDialogs["VOCVENDOR_SELL_JUNK"] = {
   whileDead = true,
   hideOnEscape = true,
 }
+
+-- ======= Merchant search =======
+-- A bag-style search box on Blizzard's own merchant window: type to dim
+-- the goods that do not match, page freely, clear to restore. Matching
+-- is a case-insensitive substring on the displayed name. The buyback tab
+-- is untouched: switching to it parks the box and restores full
+-- brightness. Everything is presence-gated: without the merchant frame
+-- or its API the box never builds and the update hook never installs.
+--
+-- Sources of truth (both clients, same shape and flow): Vanilla and
+-- Mainline MerchantFrame.lua call bare GetMerchantItemInfo(index) with
+-- the name first and address rows as _G["MerchantItem"..i] across pages
+-- of MERCHANT_ITEMS_PER_PAGE (10) under MerchantFrame_Update, gated on
+-- MerchantFrame.selectedTab == 1 for goods. SearchBoxTemplate is
+-- Blizzard's own in Shared InputBoxTemplates.xml on both branches.
+ns.merchantSearch = ""
+ns.merchantSearchHooked = false
+ns.merchantSearchBox = nil
+
+-- True when this merchant row index matches the query. The name comes
+-- from Blizzard's own per-slot read (the same call its update uses),
+-- pcall-guarded: a refused read matches nothing typed, while an empty
+-- slot (no name) stays bright - there is nothing to filter there.
+function ns.merchantIndexMatches(index, query)
+  if query == "" then return true end
+  if type(GetMerchantItemInfo) ~= "function" then return false end
+  local ok, name = pcall(GetMerchantItemInfo, index)
+  if not ok then return false end
+  if type(name) ~= "string" or name == "" then return true end
+  return name:lower():find(query, 1, true) ~= nil
+end
+
+-- Dims merchant rows that do not match, in place like the bag search.
+-- Runs after every Blizzard refresh (paging, tab switches, stock
+-- updates): the update hook owns re-application, typing only stores the
+-- query. Returns the hit count on the goods tab, nil elsewhere.
+function ns.applyMerchantSearch()
+  if type(MerchantFrame) ~= "table" then return nil end
+  local perPage = tonumber(MERCHANT_ITEMS_PER_PAGE) or 10
+  local query = type(ns.merchantSearch) == "string" and ns.merchantSearch or ""
+  local box = ns.merchantSearchBox
+  if MerchantFrame.selectedTab ~= 1 then
+    -- Buyback: park the box, restore the rows.
+    if type(box) == "table" then
+      if type(box.ClearFocus) == "function" then box:ClearFocus() end
+      if type(box.Hide) == "function" then box:Hide() end
+    end
+    for i = 1, perPage do
+      local row = _G["MerchantItem" .. i]
+      if type(row) == "table" and type(row.IsShown) == "function" and row:IsShown() then
+        row.searchHit = true
+        if type(row.SetAlpha) == "function" then row:SetAlpha(1) end
+      end
+    end
+    return nil
+  end
+  if type(box) == "table" and type(box.Show) == "function" then box:Show() end
+  local page = tonumber(MerchantFrame.page) or 1
+  local hits = 0
+  for i = 1, perPage do
+    local index = (page - 1) * perPage + i
+    local row = _G["MerchantItem" .. i]
+    if type(row) == "table" and type(row.IsShown) == "function" and row:IsShown() then
+      local hit = ns.merchantIndexMatches(index, query)
+      row.searchHit = hit
+      if type(row.SetAlpha) == "function" then row:SetAlpha(hit and 1 or 0.35) end
+      if hit then hits = hits + 1 end
+    end
+  end
+  return hits
+end
+
+-- Builds the search box once, on first merchant visit. SearchBoxTemplate
+-- is Blizzard's own (its hint and clear button come with it); the
+-- InputBoxTemplate fallback covers clients without it. The template
+-- owns its own text-changed behavior, so the query hooks on (never
+-- replacing it), with a plain set as the last resort.
+function ns.ensureMerchantSearch()
+  if ns.merchantSearchBox then return ns.merchantSearchBox end
+  if type(MerchantFrame) ~= "table" then return nil end
+  if type(CreateFrame) ~= "function" then return nil end
+  local box = nil
+  local ok, made = pcall(CreateFrame, "EditBox", nil, MerchantFrame, "SearchBoxTemplate")
+  if ok and made ~= nil then box = made end
+  if not box then
+    local okFb, madeFb = pcall(CreateFrame, "EditBox", nil, MerchantFrame, "InputBoxTemplate")
+    if okFb and madeFb ~= nil then box = madeFb end
+  end
+  if not box then return nil end
+  box:SetSize(150, 20)
+  box:SetPoint("TOPRIGHT", MerchantFrame, "TOPRIGHT", -34, -30)
+  if type(box.SetAutoFocus) == "function" then box:SetAutoFocus(false) end
+  if box.Instructions and type(box.Instructions.SetText) == "function" then
+    box.Instructions:SetText("Search")
+  end
+  local function onQuery(self)
+    local text = ""
+    if type(self.GetText) == "function" then text = self:GetText() or "" end
+    ns.merchantSearch = strtrim(text):lower()
+    ns.applyMerchantSearch()
+  end
+  if type(box.HookScript) == "function" then
+    box:HookScript("OnTextChanged", onQuery)
+    box:HookScript("OnEnter", function(self)
+      if type(IsMouseButtonDown) == "function" and IsMouseButtonDown() then return end
+      if type(GameTooltip) ~= "table" then return end
+      GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+      GameTooltip:AddLine("Find goods by name - non-matches dim",
+        COLORS.text[1], COLORS.text[2], COLORS.text[3])
+      GameTooltip:Show()
+    end)
+    box:HookScript("OnLeave", function()
+      if type(GameTooltip) == "table" then GameTooltip:Hide() end
+    end)
+  elseif type(box.SetScript) == "function" then
+    box:SetScript("OnTextChanged", onQuery)
+  end
+  if type(MerchantFrame.HookScript) == "function" then
+    pcall(MerchantFrame.HookScript, MerchantFrame, "OnHide", function()
+      -- A closed merchant reopens unfiltered, like the bags do.
+      if type(box.GetText) == "function" and type(box.SetText) == "function"
+        and box:GetText() ~= "" then
+        box:SetText("")
+      end
+      ns.merchantSearch = ""
+    end)
+  end
+  ns.merchantSearchBox = box
+  return box
+end
+
+-- Post-hook: re-apply the dim after Blizzard rebuilds the rows (paging,
+-- tab switches, MERCHANT_UPDATE stock refreshes). Never replaces the
+-- update, only reads after it.
+function ns.hookMerchantSearch()
+  if ns.merchantSearchHooked then return end
+  if type(hooksecurefunc) ~= "function" then return end
+  if type(MerchantFrame) ~= "table" then return end
+  local ok = pcall(hooksecurefunc, "MerchantFrame_Update", ns.applyMerchantSearch)
+  if ok then ns.merchantSearchHooked = true end
+end
 
 -- Delete confirm: one dead item per dialog, named by link. The Accept
 -- click is the hardware event the container delete needs.

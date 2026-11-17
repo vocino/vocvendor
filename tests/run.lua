@@ -175,7 +175,25 @@ local function loadAddon(world)
   g.PlaySound = function(id) world.playedSounds[#world.playedSounds + 1] = id end
   g.MerchantFrame = {
     IsShown = function() return world.merchantOpen end,
+    selectedTab = 1,
+    page = 1,
+    scripts = {},
+    SetScript = function(self, n, fn) self.scripts[n] = fn end,
+    HookScript = function(self, n, fn)
+      local prev = self.scripts[n]
+      self.scripts[n] = function(...)
+        if prev then prev(...) end
+        return fn(...)
+      end
+    end,
   }
+  -- world.merchantGoods[index] is the displayed name of that merchant
+  -- slot; a missing slot is empty (stays bright under any query).
+  g.GetMerchantItemInfo = function(index)
+    local name = world.merchantGoods[index]
+    if name == nil then return nil end
+    return name, 136000 + index, 100, 1, -1, true, true
+  end
   world.blizzClick = function() world.blizzClicked = true end
   g.MerchantSellAllJunkButton = {
     IsShown = function() return true end,
@@ -284,6 +302,10 @@ local function loadAddon(world)
     f.GetAttribute = function(_, n) return f.attrs[n] end
     f.RegisterForClicks = function() end
     f.SetText = function(_, t) f.text = t end
+    f.GetText = function() return f.text or "" end
+    f.SetAutoFocus = function() end
+    f.ClearFocus = function() end
+    f.SetAlpha = function(_, a) f.alpha = a end
     f.SetSize = function(_, w, h) f.size = { w, h } end
     f.SetPoint = function(_, ...) f.point = { ... } end
     f.ClearAllPoints = function() f.cleared = true end
@@ -448,6 +470,15 @@ local function loadAddon(world)
   end
   local ns = {}
   chunk("VocVendor", ns)
+  -- Blizzard's own merchant rows, created after the event frame so
+  -- world.frames[1] stays the event frame.
+  world.merchantButtons = {}
+  for i = 1, 10 do
+    local row = makeFrame("Frame", "MerchantItem" .. i)
+    row.shown = true -- Blizzard never hides the row frame, only its button
+    g["MerchantItem" .. i] = row
+    world.merchantButtons[i] = row
+  end
   world.frame = world.frames[1] -- the event frame, created at load
   world.frame.onEvent = function(...)
     return world.frames[1].scripts.OnEvent(...)
@@ -484,6 +515,7 @@ local function newWorld()
     toyInfo = {}, ownedToys = {}, petSpecies = {}, petOwned = {},
     artifactPower = {}, completedQuestIDs = {}, questTitles = {},
     tipLines = {}, tipLink = nil, cursor = nil,
+    merchantGoods = {},
     loadedAddons = {},
     combat = false, deSpellName = "Disenchant", noSecure = false,
   }
@@ -3375,6 +3407,114 @@ do
     desc = "use: increases strength by 200 for 1 hour." })
   check("numbers still decide without experience",
     ns.consumableBetter(ns.consumablePower(feast), ns.consumablePower(plain)) == false)
+end
+
+-- 107. Merchant search dims non-matching goods like the bag search;
+-- empty slots stay bright, and the box + update hook build on visit.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.merchantGoods = {
+    "Pattern: Wisdom's Leather Belt",
+    "Pattern: Stormrider's Leather Kilt",
+    "Heavy Wool Bandage",
+  }
+  w.env.MerchantFrame.selectedTab = 1
+  w.env.MerchantFrame.page = 1
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("merchant box built", ns.merchantSearchBox ~= nil)
+  check("update hook installed", w.hooks["MerchantFrame_Update"] ~= nil)
+  local box = ns.merchantSearchBox
+  box:SetText("kilt")
+  box.scripts.OnTextChanged(box)
+  check("match stays bright",
+    w.merchantButtons[2].searchHit == true and w.merchantButtons[2].alpha == 1)
+  check("non-matches dim",
+    w.merchantButtons[1].searchHit == false and w.merchantButtons[1].alpha == 0.35)
+  check("third dims", w.merchantButtons[3].searchHit == false)
+  check("empty slots stay bright",
+    w.merchantButtons[4].searchHit == true and w.merchantButtons[4].alpha == 1)
+  check("hit count covers empty slots", ns.applyMerchantSearch() == 8)
+end
+
+-- 108. The filter follows the page: indices beyond the first page dim
+-- by their own names, and the update hook re-applies after refreshes.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  for i = 1, 10 do w.merchantGoods[i] = "Pattern: Goods" .. i end
+  w.merchantGoods[11] = "Pattern: Totemic Leather Leggings"
+  w.merchantGoods[12] = "Heavy Wool Bandage"
+  w.env.MerchantFrame.selectedTab = 1
+  w.env.MerchantFrame.page = 2
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  local box = ns.merchantSearchBox
+  box:SetText("bandage")
+  box.scripts.OnTextChanged(box)
+  check("page-two miss dims",
+    w.merchantButtons[1].searchHit == false and w.merchantButtons[1].alpha == 0.35)
+  check("page-two match stays bright",
+    w.merchantButtons[2].searchHit == true and w.merchantButtons[2].alpha == 1)
+  w.hooks["MerchantFrame_Update"]()
+  check("refresh re-applies the dim",
+    w.merchantButtons[1].searchHit == false and w.merchantButtons[2].alpha == 1)
+  box:SetText("")
+  box.scripts.OnTextChanged(box)
+  check("clearing restores the page", ns.applyMerchantSearch() == 10)
+end
+
+-- 109. The buyback tab parks the box and restores the rows; closing
+-- the merchant clears the query.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.merchantGoods = { "Pattern: Stormrider's Leather Kilt" }
+  w.env.MerchantFrame.selectedTab = 1
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  local box = ns.merchantSearchBox
+  box:SetText("kilt")
+  box.scripts.OnTextChanged(box)
+  w.env.MerchantFrame.selectedTab = 2
+  w.hooks["MerchantFrame_Update"]()
+  check("buyback parks the box", box.shown == false)
+  check("buyback restores rows", w.merchantButtons[1].alpha == 1)
+  w.env.MerchantFrame.selectedTab = 1
+  w.hooks["MerchantFrame_Update"]()
+  check("goods tab shows the box again", box.shown == true)
+  w.env.MerchantFrame.scripts.OnHide(w.env.MerchantFrame)
+  check("hide clears the box",
+    box:GetText() == "" and ns.merchantSearch == "")
+end
+
+-- 110. Presence gates: no frame builds nothing and hooks nothing; no
+-- item API still builds the box and stays silent.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  w.env.MerchantFrame = nil
+  w.env.GetMerchantItemInfo = nil
+  clientLoaded(w)
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("no frame builds no box", ns.merchantSearchBox == nil)
+  check("no frame installs no hook", ns.merchantSearchHooked == false)
+  check("apply without frame stays silent", ns.applyMerchantSearch() == nil)
+end
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.env.GetMerchantItemInfo = nil
+  w.merchantGoods = { "Pattern: Wisdom's Leather Belt" }
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("box still builds without the API", ns.merchantSearchBox ~= nil)
+  local box = ns.merchantSearchBox
+  box:SetText("wisdom")
+  box.scripts.OnTextChanged(box)
+  check("refused read matches nothing typed",
+    w.merchantButtons[1].searchHit == false)
 end
 
 print("ok - " .. passed .. " checks passed")
