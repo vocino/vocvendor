@@ -3429,12 +3429,12 @@ do
   box:SetText("kilt")
   box.scripts.OnTextChanged(box)
   check("match stays bright",
-    w.merchantButtons[2].searchHit == true and w.merchantButtons[2].alpha == 1)
+    ns.merchantRowHit[2] == true and w.merchantButtons[2].alpha == 1)
   check("non-matches dim",
-    w.merchantButtons[1].searchHit == false and w.merchantButtons[1].alpha == 0.35)
-  check("third dims", w.merchantButtons[3].searchHit == false)
+    ns.merchantRowHit[1] == false and w.merchantButtons[1].alpha == 0.35)
+  check("third dims", ns.merchantRowHit[3] == false)
   check("empty slots stay bright",
-    w.merchantButtons[4].searchHit == true and w.merchantButtons[4].alpha == 1)
+    ns.merchantRowHit[4] == true and w.merchantButtons[4].alpha == 1)
   check("hit count covers empty slots", ns.applyMerchantSearch() == 8)
 end
 
@@ -3454,12 +3454,12 @@ do
   box:SetText("bandage")
   box.scripts.OnTextChanged(box)
   check("page-two miss dims",
-    w.merchantButtons[1].searchHit == false and w.merchantButtons[1].alpha == 0.35)
+    ns.merchantRowHit[1] == false and w.merchantButtons[1].alpha == 0.35)
   check("page-two match stays bright",
-    w.merchantButtons[2].searchHit == true and w.merchantButtons[2].alpha == 1)
+    ns.merchantRowHit[2] == true and w.merchantButtons[2].alpha == 1)
   w.hooks["MerchantFrame_Update"]()
   check("refresh re-applies the dim",
-    w.merchantButtons[1].searchHit == false and w.merchantButtons[2].alpha == 1)
+    ns.merchantRowHit[1] == false and w.merchantButtons[2].alpha == 1)
   box:SetText("")
   box.scripts.OnTextChanged(box)
   check("clearing restores the page", ns.applyMerchantSearch() == 10)
@@ -3514,7 +3514,7 @@ do
   box:SetText("wisdom")
   box.scripts.OnTextChanged(box)
   check("refused read matches nothing typed",
-    w.merchantButtons[1].searchHit == false)
+    ns.merchantRowHit[1] == false)
 end
 
 print("ok - " .. passed .. " checks passed")

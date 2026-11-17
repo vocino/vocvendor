@@ -1587,6 +1587,7 @@ StaticPopupDialogs["VOCVENDOR_SELL_JUNK"] = {
 ns.merchantSearch = ""
 ns.merchantSearchHooked = false
 ns.merchantSearchBox = nil
+ns.merchantRowHit = {} -- per-row match flags, by visible row 1..10
 
 -- True when this merchant row index matches the query. The name comes
 -- from Blizzard's own per-slot read (the same call its update uses),
@@ -1595,10 +1596,10 @@ ns.merchantSearchBox = nil
 function ns.merchantIndexMatches(index, query)
   if query == "" then return true end
   if type(GetMerchantItemInfo) ~= "function" then return false end
-  local ok, name = pcall(GetMerchantItemInfo, index)
+  local ok, itemName = pcall(GetMerchantItemInfo, index)
   if not ok then return false end
-  if type(name) ~= "string" or name == "" then return true end
-  return name:lower():find(query, 1, true) ~= nil
+  if type(itemName) ~= "string" or itemName == "" then return true end
+  return itemName:lower():find(query, 1, true) ~= nil
 end
 
 -- Dims merchant rows that do not match, in place like the bag search.
@@ -1619,7 +1620,7 @@ function ns.applyMerchantSearch()
     for i = 1, perPage do
       local row = _G["MerchantItem" .. i]
       if type(row) == "table" and type(row.IsShown) == "function" and row:IsShown() then
-        row.searchHit = true
+        ns.merchantRowHit[i] = true
         if type(row.SetAlpha) == "function" then row:SetAlpha(1) end
       end
     end
@@ -1633,7 +1634,7 @@ function ns.applyMerchantSearch()
     local row = _G["MerchantItem" .. i]
     if type(row) == "table" and type(row.IsShown) == "function" and row:IsShown() then
       local hit = ns.merchantIndexMatches(index, query)
-      row.searchHit = hit
+      ns.merchantRowHit[i] = hit
       if type(row.SetAlpha) == "function" then row:SetAlpha(hit and 1 or 0.35) end
       if hit then hits = hits + 1 end
     end
