@@ -860,7 +860,32 @@ function ns.sellConsumablesNow(items)
   end
 end
 
--- The confirm list: itemized lines plus a Sell All / Cancel popup.
+-- Dialog text for the Sell All confirm: the question plus one row per
+-- distinct item, so the decision happens with the list in front of the
+-- player, not just in chat. Capped: the chat already carries the full
+-- list, so the dialog names the overflow instead of growing unbounded.
+local CONSUMABLE_DIALOG_ROWS = 10
+function ns.consumableDialogText(sale)
+  local groups = ns.mergeStacks(sale)
+  local total, n = 0, 0
+  for _, g in ipairs(groups) do
+    total, n = total + g.total, n + g.qty
+  end
+  local lines = { "Sell " .. n .. " losing consumables for "
+    .. ns.moneyString(total) .. "?", "" }
+  for i, g in ipairs(groups) do
+    if i > CONSUMABLE_DIALOG_ROWS then
+      lines[#lines + 1] = "  ...and " .. (#groups - CONSUMABLE_DIALOG_ROWS)
+        .. " more (full list in chat)"
+      break
+    end
+    lines[#lines + 1] = ns.mergedLine(g)
+  end
+  return table.concat(lines, "\n")
+end
+
+-- The confirm list: the question plus one row per item, in the dialog
+-- as well as chat, plus a Sell All / Cancel popup.
 function ns.reportConsumables(sale)
   if not sale or #sale == 0 then return end
   local groups = ns.mergeStacks(sale)
@@ -872,6 +897,8 @@ function ns.reportConsumables(sale)
   ns.say("losing consumables (" .. what .. "):")
   for _, g in ipairs(groups) do print(ns.mergedLine(g)) end
   ns.play("open") -- the confirm list is the readout
+  StaticPopupDialogs["VOCVENDOR_SELL_CONSUMABLES"].text =
+    ns.consumableDialogText(sale)
   StaticPopup_Show("VOCVENDOR_SELL_CONSUMABLES",
     n, ns.moneyString(total), { items = sale })
 end
@@ -1579,26 +1606,54 @@ StaticPopupDialogs["VOCVENDOR_SELL_JUNK"] = {
 -- or its API the box never builds and the update hook never installs.
 --
 -- Sources of truth (both clients, same shape and flow): Vanilla and
--- Mainline MerchantFrame.lua call bare GetMerchantItemInfo(index) with
--- the name first and address rows as _G["MerchantItem"..i] across pages
--- of MERCHANT_ITEMS_PER_PAGE (10) under MerchantFrame_Update, gated on
--- MerchantFrame.selectedTab == 1 for goods. SearchBoxTemplate is
+-- Mainline MerchantFrame.lua address rows as _G["MerchantItem"..i]
+-- across pages of MERCHANT_ITEMS_PER_PAGE (10) under
+-- MerchantFrame_Update, gated on MerchantFrame.selectedTab == 1 for
+-- goods. Names come from C_MerchantFrame.GetItemInfo(index) (documented
+-- on both branches, and the only read live Mainline uses); the bare
+-- GetMerchantItemInfo(index) with the name first (Vanilla's own call)
+-- covers clients without the namespace. SearchBoxTemplate is
 -- Blizzard's own in Shared InputBoxTemplates.xml on both branches.
 ns.merchantSearch = ""
 ns.merchantSearchHooked = false
 ns.merchantSearchBox = nil
 ns.merchantRowHit = {} -- per-row match flags, by visible row 1..10
 
--- True when this merchant row index matches the query. The name comes
--- from Blizzard's own per-slot read (the same call its update uses),
--- pcall-guarded: a refused read matches nothing typed, while an empty
--- slot (no name) stays bright - there is nothing to filter there.
+-- The displayed name for this merchant row index: the name, nil for
+-- an empty slot, or false when unreadable. C_MerchantFrame is the read
+-- Blizzard's own update uses on both clients; the bare read covers
+-- clients without the namespace. Every call is pcall-guarded.
+function ns.merchantIndexName(index)
+  if type(C_MerchantFrame) == "table"
+    and type(C_MerchantFrame.GetItemInfo) == "function" then
+    local ok, info = pcall(C_MerchantFrame.GetItemInfo, index)
+    if ok and type(info) == "table" then
+      if type(info.name) == "string" and info.name ~= "" then
+        return info.name
+      end
+      return nil
+    end
+  end
+  if type(GetMerchantItemInfo) == "function" then
+    local okBare, itemName = pcall(GetMerchantItemInfo, index)
+    if okBare then
+      if type(itemName) == "string" and itemName ~= "" then
+        return itemName
+      end
+      return nil
+    end
+  end
+  return false
+end
+
+-- True when this merchant row index matches the query: a refused read
+-- matches nothing typed, while an empty slot (no name) stays bright -
+-- there is nothing to filter there.
 function ns.merchantIndexMatches(index, query)
   if query == "" then return true end
-  if type(GetMerchantItemInfo) ~= "function" then return false end
-  local ok, itemName = pcall(GetMerchantItemInfo, index)
-  if not ok then return false end
-  if type(itemName) ~= "string" or itemName == "" then return true end
+  local itemName = ns.merchantIndexName(index)
+  if itemName == nil then return true end
+  if itemName == false then return false end
   return itemName:lower():find(query, 1, true) ~= nil
 end
 

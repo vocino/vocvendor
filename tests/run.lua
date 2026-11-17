@@ -154,6 +154,13 @@ local function loadAddon(world)
       world.junkSold = true
       world.money = world.money + world.junkValue
     end,
+    -- world.merchantGoods[index] drives the C_ struct; an empty slot
+    -- answers without a name.
+    GetItemInfo = function(index)
+      local name = world.merchantGoods[index]
+      if name == nil then return {} end
+      return { name = name }
+    end,
   }
   g.C_SpellBook = {
     ContainsAnyDisenchantSpell = function() return world.canDE == true end,
@@ -2445,6 +2452,38 @@ do
     and o.hiddenPopups[1].which == "VOCVENDOR_SELL_CONSUMABLES")
 end
 
+-- 77b. The Sell All confirm lists which consumables sell: one row
+-- per distinct item in the dialog, capped with an overflow line.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  local sale = {}
+  for i = 1, 12 do
+    sale[#sale + 1] = { link = "item:loss" .. i, price = 10, count = 1 }
+  end
+  local text = ns.consumableDialogText(sale)
+  check("dialog asks the question",
+    text:find("Sell 12 losing consumables for 1s 20c?", 1, true) ~= nil)
+  check("dialog lists the rows",
+    text:find("  item:loss1 for 10c", 1, true) ~= nil
+    and text:find("  item:loss10 for 10c", 1, true) ~= nil)
+  check("dialog caps with overflow",
+    text:find("item:loss11", 1, true) == nil
+    and text:find("...and 2 more (full list in chat)", 1, true) ~= nil)
+  ns.reportConsumables(sale)
+  check("popup carries the items", #w.popups == 1
+    and w.popups[1].data.items == sale)
+  check("shown dialog lists the sale",
+    w.env.StaticPopupDialogs["VOCVENDOR_SELL_CONSUMABLES"].text == text)
+  local one = { { link = "item:only", price = 50, count = 3 } }
+  ns.reportConsumables(one)
+  check("single-item dialog asks through the confirm path",
+    w.env.StaticPopupDialogs["VOCVENDOR_SELL_CONSUMABLES"].text ==
+    ns.consumableDialogText(one)
+    and w.env.StaticPopupDialogs["VOCVENDOR_SELL_CONSUMABLES"].text:find(
+      "Sell 3 losing consumables for 1s 50c?", 1, true) ~= nil)
+end
+
 -- 78. Slash: /vv consume needs a vendor; /vv protect toggles and lists.
 do
   local w = newWorld()
@@ -3518,6 +3557,7 @@ do
   local ns = loadAddon(w)
   clientLoaded(w)
   w.env.GetMerchantItemInfo = nil
+  w.env.C_MerchantFrame.GetItemInfo = nil
   w.merchantGoods = { "Pattern: Wisdom's Leather Belt" }
   w.frame.onEvent(nil, "MERCHANT_SHOW")
   check("box still builds without the API", ns.merchantSearchBox ~= nil)
@@ -3526,6 +3566,21 @@ do
   box.scripts.OnTextChanged(box)
   check("refused read matches nothing typed",
     ns.merchantRowHit[1] == false)
+end
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.env.C_MerchantFrame.GetItemInfo = nil
+  w.merchantGoods = { "Light Shot", "Heavy Wool Bandage" }
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  local box = ns.merchantSearchBox
+  box:SetText("Shot")
+  box.scripts.OnTextChanged(box)
+  check("bare read falls back for the match",
+    ns.merchantRowHit[1] == true and w.merchantButtons[1].alpha == 1)
+  check("bare read falls back for the miss",
+    ns.merchantRowHit[2] == false and w.merchantButtons[2].alpha == 0.35)
 end
 
 print("ok - " .. passed .. " checks passed")
