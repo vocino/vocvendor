@@ -24,7 +24,8 @@ local function loadAddon(world)
   g.SlashCmdList = {}
   g.NUM_BAG_SLOTS = 4
   g.Enum = {
-    ItemClass = { Consumable = 0, Weapon = 2, Armor = 4 },
+    ItemClass = { Consumable = 0, Weapon = 2, Armor = 4,
+      Miscellaneous = 15, Profession = 19 },
     ItemWeaponSubclass = { Fishingpole = 20 },
     ItemConsumableSubclass = { Generic = 0, Potion = 1, Elixir = 2,
       Flasksphials = 3, Scroll = 4, Fooddrink = 5, Itemenhancement = 6,
@@ -2640,6 +2641,41 @@ do
   local sale = ns.collectConsumableSale()
   check("consumable sale still takes the loser",
     #sale == 1 and sale[1].link == weak)
+end
+
+-- 81b. Profession tools never sell, whatever the sweep: a Classic
+-- skinning knife (Miscellaneous, weapon slot), a Profession-class tool,
+-- and a fishing pole all keep when their expansion is checked.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().junkOldGear = true
+  ns.opts().sellClassic = true
+  w.equipped[16] = gear(w, { slot = "INVTYPE_2HWEAPON", classID = 2, level = 400 })
+  local WSC = w.env.Enum.ItemWeaponSubclass
+  local knife = gear(w, { slot = "INVTYPE_WEAPON", classID = 15, sub = 4,
+    level = 4, price = 16, expansion = 0 })
+  local pick = gear(w, { slot = "INVTYPE_PROFESSION_TOOL", classID = 19, sub = 10,
+    level = 1, price = 100, expansion = 0 })
+  local pole = gear(w, { slot = "INVTYPE_2HWEAPON", classID = 2,
+    sub = WSC.Fishingpole, level = 10, price = 100, expansion = 0 })
+  local bKnife, sKnife = putBag(w, knife)
+  local bPick, sPick = putBag(w, pick)
+  local bPole, sPole = putBag(w, pole)
+  check("skinning knife is a profession tool", ns.isProfessionTool(knife) == true)
+  check("profession-class tool is a profession tool", ns.isProfessionTool(pick) == true)
+  check("fishing pole is a profession tool", ns.isProfessionTool(pole) == true)
+  check("knife never old gear", ns.isOldGear(knife, 30) == false)
+  check("pole never old gear", ns.isOldGear(pole, 30) == false)
+  check("knife never expansion junk",
+    ns.isExpansionJunk(knife, bKnife, sKnife) == false)
+  check("profession tool never expansion junk",
+    ns.isExpansionJunk(pick, bPick, sPick) == false)
+  check("pole never expansion junk",
+    ns.isExpansionJunk(pole, bPole, sPole) == false)
+  check("tools excluded from the old-gear sweep", #ns.collectOldGear() == 0)
+  check("tools excluded from the expansion sweep", #ns.collectExpansionJunk() == 0)
 end
 
 -- 82. Sale guards and diagnosis: a closed vendor stops cleanly, taint

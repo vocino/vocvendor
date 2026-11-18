@@ -2485,6 +2485,45 @@ function ns.checkCollectible(itemID, link)
   end
   return false
 end
+-- Profession implements are tools, not junk: fishing poles, skinning
+-- knives, mining picks, and profession-class tools/gear. A Classic
+-- skinning knife is Miscellaneous sitting in a weapon slot; DF+
+-- implements are ItemClass Profession (19, verified in
+-- ItemConstantsDocumentation on live + forever) or sit in the
+-- profession equip slots. Fail closed: without the item API nothing
+-- counts as a tool here, and the callers keep unknown items anyway.
+function ns.isProfessionTool(link)
+  if type(C_Item) ~= "table" then return false end
+  if type(C_Item.GetItemInfoInstant) ~= "function" then return false end
+  if type(Enum) ~= "table" or type(Enum.ItemClass) ~= "table" then return false end
+  local ok, _, _, _, equipLoc, _, classID, subClassID =
+    pcall(C_Item.GetItemInfoInstant, link)
+  if not ok then return false end
+  local Profession = Enum.ItemClass.Profession or 19
+  local Miscellaneous = Enum.ItemClass.Miscellaneous or 15
+  if classID == Profession then return true end
+  local fishingpole = 20
+  if type(Enum.ItemWeaponSubclass) == "table"
+    and Enum.ItemWeaponSubclass.Fishingpole ~= nil then
+    fishingpole = Enum.ItemWeaponSubclass.Fishingpole
+  end
+  if classID == Enum.ItemClass.Weapon and subClassID == fishingpole then
+    return true
+  end
+  if equipLoc == "INVTYPE_PROFESSION_TOOL"
+    or equipLoc == "INVTYPE_PROFESSION_GEAR" then
+    return true
+  end
+  if classID == Miscellaneous and type(equipLoc) == "string" and equipLoc ~= "" then
+    if type(ns.slotPairs) == "table" and type(ns.primarySlot) == "table" then
+      if ns.slotPairs[equipLoc] ~= nil or ns.primarySlot[equipLoc] ~= nil then
+        return true
+      end
+    end
+  end
+  return false
+end
+
 -- The `why` table is the audit readout (/vv why): when given, the
 -- first failing gate names itself in why.reason instead of silently
 -- keeping, so a bag that never sells explains itself in one chat line.
@@ -2496,17 +2535,14 @@ function ns.isOldGear(link, gap, ignoreDE, scan, why)
   if ns.isUncollectedCollectible(link, scan and scan.memo) then
     return stop("uncollected appearance, toy, or pet")
   end
-  local _, _, _, equipLoc, _, classID, subClassID = C_Item.GetItemInfoInstant(link)
+  local _, _, _, equipLoc, _, classID = C_Item.GetItemInfoInstant(link)
   if not equipLoc or equipLoc == "" then return stop("not equipment") end
   if classID ~= Enum.ItemClass.Weapon and classID ~= Enum.ItemClass.Armor then
     return stop("not weapon or armor")
   end
-  -- Profession implements are tools, not gear: a fishing pole is never
-  -- junk by item level, whatever is equipped. (Fishingpole 20, verified
-  -- on live + forever.)
-  if classID == Enum.ItemClass.Weapon
-    and type(Enum.ItemWeaponSubclass) == "table"
-    and subClassID == Enum.ItemWeaponSubclass.Fishingpole then
+  -- Profession implements are tools, not gear: never junk by item
+  -- level, whatever is equipped (see ns.isProfessionTool).
+  if ns.isProfessionTool(link) then
     return stop("profession tool")
   end
   local _, _, quality, _, _, _, _, _, _, _, sellPrice, _, _, bindType =
@@ -2651,11 +2687,13 @@ end
 -- to the consumable sale, where winners keep one stack and losers sell
 -- with a summary. The check on the row is the consent, so the ilvl
 -- gap does not apply here; every keep gate does (equipment sets,
--- transmog/toy/pet, Pawn upgrades, live quest items, heirlooms), and
--- disenchantables divert to the disenchant list first unless ignoreDE.
+-- transmog/toy/pet, Pawn upgrades, live quest items, heirlooms,
+-- profession tools), and disenchantables divert to the disenchant list
+-- first unless ignoreDE.
 function ns.isExpansionJunk(link, bag, slot, ignoreDE, scan)
   local id = ns.expansionID(link)
   if id == nil or not ns.expansionChecked(id) then return false end
+  if ns.isProfessionTool(link) then return false end
   if ns.inEquipmentSet(bag, slot) then return false end
   if not ns.slotHasValue(bag, slot) then return false end
   if ns.consumableCategory(link, scan and scan.descs) ~= nil then return false end

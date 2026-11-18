@@ -76,8 +76,9 @@ Grays go through Blizzard's own junk sale, the same call the Sell
 Junk button makes. Old gear is weapons and armor at least the
 configured gap below everything you wear in that slot (when AutoGear
 scores both items, anything it scores strictly lower sells instead), never
-heirlooms, never profession tools (fishing poles are tools, not
-weapons, whatever is equipped), never anything in a saved equipment
+heirlooms, never profession tools (fishing poles, skinning knives,
+mining picks, and profession tools and gear are tools, not gear,
+whatever is equipped), never anything in a saved equipment
 set, never anything AutoGear rates above what you wear when it is
 installed (the same veto Pawn gives on retail), never anything
 Pawn flags as an upgrade when Pawn is
@@ -88,7 +89,7 @@ expansion sells, whatever the type, except confidently placed
 consumables, which defer to the consumable sale (winners keep their
 stack there instead), with the same gates holding
 (equipment sets, transmog and toys and pets, Pawn upgrades, live quest
-items, heirlooms, auction value). Disenchantables still divert to the
+items, heirlooms, profession tools, auction value). Disenchantables still divert to the
 disenchant list first for enchanters. Each
 candidate is re-checked by bag slot right before it sells, so a bag
 that shifted between the dry run and the click never sells the wrong
