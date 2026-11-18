@@ -206,26 +206,6 @@ function ns.moneyString(copper)
   if s > 0 then return string.format("%ds %dc", s, c) end
   return string.format("%dc", c)
 end
--- The same cost with coin icons, matching Auctionator's own tooltip
--- lines piece for piece (same icons, sizes, and zero padding).
-function ns.moneyIcons(copper)
-  copper = math.floor(tonumber(copper) or 0)
-  if copper < 0 then copper = 0 end
-  local g = math.floor(copper / 10000)
-  local s = math.floor((copper % 10000) / 100)
-  local c = copper % 100
-  local goldIcon = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12:0:0|t"
-  local silverIcon = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12:0:0|t"
-  local copperIcon = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12:0:0|t"
-  local result = c .. " " .. copperIcon
-  if (g ~= 0 or s ~= 0) and c < 10 then result = "0" .. result end
-  if s ~= 0 or g ~= 0 then
-    result = s .. " " .. silverIcon .. " " .. result
-  end
-  if g ~= 0 and s < 10 then result = "0" .. result end
-  if g ~= 0 then result = g .. " " .. goldIcon .. " " .. result end
-  return result
-end
 
 -- ======= Auction math =======
 -- Auction math: vendor vs auction vs disenchant-then-auction. Other
@@ -409,30 +389,27 @@ local function splitTooltipLine(raw)
   end
   return parts
 end
--- True when a tooltip already carries our costs: a bundle-shaped
--- segment ending in a money total. Pristine Blizzard lines never do,
--- so re-entry never appends costs twice.
+-- True when a tooltip already carries our winner mark. Blizzard never
+-- writes the word, so finding it means re-entry: skip the tooltip.
 local function tooltipMarked(lines)
   for _, text in ipairs(lines or {}) do
-    for _, piece in ipairs(splitTooltipLine(tostring(text or ""))) do
-      if crateBundleFrom(piece)
-        and (piece:find(" %d+c$")
-          or piece:find(" %d+s %d+c$")
-          or piece:find(" %d+g %d+s$")) then
-        return true
-      end
-    end
+    if tostring(text or ""):find("Cheapest", 1, true) then return true end
   end
   return false
 end
+-- Wrap text in a palette color's hex codes for inline tooltip use.
+function ns.colored(color, text)
+  return string.format("|cff%02x%02x%02x%s|r",
+    math.floor(color[1] * 255 + 0.5),
+    math.floor(color[2] * 255 + 0.5),
+    math.floor(color[3] * 255 + 0.5), tostring(text or ""))
+end
 -- Tooltip lines to crate bundles, or nil when the tooltip is not a
 -- Waylaid Crate. Each bundle keeps its tooltip line number (several
--- bundles can share one line) so the annotation can rewrite that line.
--- Costs already present mean the whole tooltip is done, so re-entry
--- never appends costs twice.
+-- bundles can share one line) so the annotation can mark that line.
 function ns.parseCrateBundles(lines)
-  if type(lines) ~= "table" then return nil end
   if tooltipMarked(lines) then return nil end
+  if type(lines) ~= "table" then return nil end
   local segs = {}
   for i, text in ipairs(lines) do
     local t = tostring(text or "")
@@ -504,8 +481,8 @@ function ns.tooltipLines(tip, side)
   end
   return lines
 end
--- Left-side font strings of a live tooltip, same indices as
--- ns.tooltipLines: entries with no settable text stay nil.
+-- Left-side font strings of a live tooltip that can be rewritten,
+-- same indices as ns.tooltipLines: entries without a setter stay nil.
 function ns.tooltipFrames(tip)
   local tname, n = ns.tipSize(tip)
   if not tname then return nil end
@@ -516,12 +493,13 @@ function ns.tooltipFrames(tip)
   end
   return frames
 end
--- Rewrite each priced bundle line in place with its auction cost,
--- leaving Blizzard's own text untouched, and paint the winner's line
--- gold. Unpriced lines stay exactly as Blizzard wrote them. A crate
--- with no priced bundle gains one muted
--- hint instead, but only when a pricing guest is installed: without
--- one nothing could ever price it, so silence stays silence.
+-- Mark the cheapest bundle's row with a green Cheapest tag, leaving
+-- every line's own text otherwise untouched. SetText is the only font
+-- call that provably lands here (color setters silently fail), and the
+-- inline code renders through the same path the icon tags use. A crate
+-- with no priced bundle gains one muted hint instead, but only when a
+-- pricing guest is installed: without one nothing could ever price it,
+-- so silence stays silence.
 function ns.annotateCrateTip(tip)
   if not ns.opts().compareAuction then return end
   local lines = ns.tooltipLines(tip)
@@ -534,40 +512,25 @@ function ns.annotateCrateTip(tip)
   for _, c in ipairs(costs) do
     if c.cost and (not best or c.cost < best.cost) then best = c end
   end
-  if type(tip.AddLine) ~= "function" then return end
+  local frames = ns.tooltipFrames(tip)
   if best then
-    local frames = ns.tooltipFrames(tip)
-    if not frames then return end
-    local perLine = {}
-    for _, c in ipairs(costs) do
-      if c.cost then
-        local L = c.bundle.line
-        perLine[L] = perLine[L] or {}
-        perLine[L][#perLine[L] + 1] = c
+    local fr = frames and frames[best.bundle.line]
+    if fr then
+      local parts = splitTooltipLine(lines[best.bundle.line])
+      local p = parts[best.bundle.seg]
+      if p then
+        parts[best.bundle.seg] = p
+          .. "  " .. ns.colored(COLORS.green, "Cheapest")
+        pcall(fr.SetText, fr, table.concat(parts, "\n"))
       end
     end
-    for L, list in pairs(perLine) do
-      local fr = frames[L]
-      if fr and fr.SetText then
-        local parts = splitTooltipLine(lines[L])
-        for _, c in ipairs(list) do
-          local p = parts[c.bundle.seg]
-          if p then
-            parts[c.bundle.seg] = p .. "  " .. ns.moneyIcons(c.cost)
-          end
-        end
-        if pcall(fr.SetText, fr, table.concat(parts, "\n"))
-          and best.bundle.line == L and fr.SetTextColor then
-          pcall(fr.SetTextColor, fr,
-            COLORS.gold[1], COLORS.gold[2], COLORS.gold[3])
-        end
-      end
-    end
-  else
+  elseif type(tip.AddLine) == "function" then
     local guests = ns.priceGuests()
     if not (guests.auctionator or guests.oribos) then return end
     pcall(tip.AddLine, tip, "No auction prices yet (scan the auction house)",
       COLORS.muted[1], COLORS.muted[2], COLORS.muted[3])
+  else
+    return
   end
   if type(tip.Show) == "function" then pcall(tip.Show, tip) end
 end
@@ -613,6 +576,10 @@ function ns.diagCrate()
   end
   local bundles = ns.parseCrateBundles(lines)
   if not bundles then
+    if tooltipMarked(lines) then
+      ns.say("cheapest already marked on this tooltip")
+      return
+    end
     ns.say("hover a Waylaid Crate first")
     local gt = GameTooltip
     local shownOk, shown = pcall(gt.IsShown, gt)

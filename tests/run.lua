@@ -645,18 +645,10 @@ do
   check("money copper", ns.moneyString(89) == "89c")
   check("money zero", ns.moneyString(0) == "0c")
   check("money negative", ns.moneyString(-5) == "0c")
-  local G = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12:0:0|t"
-  local S = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12:0:0|t"
-  local C = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12:0:0|t"
-  check("icons copper", ns.moneyIcons(99) == "99 " .. C)
-  check("icons silver pads copper",
-    ns.moneyIcons(6800) == "68 " .. S .. " 00 " .. C)
-  check("icons gold pads both",
-    ns.moneyIcons(10275) == "1 " .. G .. " 02 " .. S .. " 75 " .. C)
-  check("icons unpadded tens",
-    ns.moneyIcons(18080) == "1 " .. G .. " 80 " .. S .. " 80 " .. C)
-  check("icons zero", ns.moneyIcons(0) == "0 " .. C)
-  check("icons negative", ns.moneyIcons(-5) == "0 " .. C)
+  check("colored wraps green",
+    ns.colored(ns.COLORS.green, "Cheapest") == "|cff40e659Cheapest|r")
+  check("colored wraps gold",
+    ns.colored(ns.COLORS.gold, "x") == "|cffffd100x|r")
 end
 
 -- 2b. The visit line counts every item sold, whatever pile it came
@@ -3621,11 +3613,17 @@ do
     ns.parseCrateBundles({
       "Use: Fill the crate with any bundle from the following list:",
     }) == nil)
-  check("annotated tooltips do not re-parse",
+  check("cost-suffixed lines never error",
     ns.parseCrateBundles({
       "Use: Fill the crate with any bundle from the following list:",
       "- 8 Iron Strut  68s 0c",
       "- 5 Mithril Tube  1g 2s",
+    }) ~= nil)
+  check("marked tooltips are done",
+    ns.parseCrateBundles({
+      "Use: Fill the crate with any bundle from the following list:",
+      "- 8 Iron Strut",
+      "- 5 Mithril Tube  |cff40e659Cheapest|r",
     }) == nil)
   check("non-table is no crate", ns.parseCrateBundles(nil) == nil)
   local multi = ns.parseCrateBundles({
@@ -3707,34 +3705,27 @@ do
     AddLine = function() end,
     Show = function() end,
   }
-  local painted = {}
   for i, t in ipairs(texts) do
     local text = t
     w.env["RewriteTipTextLeft" .. i] = {
       GetText = function() return text end,
       SetText = function(_, s) text = s end,
-      SetTextColor = function(_, r, g, b) painted[i] = { r, g, b } end,
     }
   end
+  local winTag = "  " .. ns.colored(w.ns.COLORS.green, "Cheapest")
   ns.annotateCrateTip(tip)
   local function line(i)
     return w.env["RewriteTipTextLeft" .. i].GetText()
   end
-  check("loser rewritten plain",
-    line(3) == "- 8 Iron Strut  " .. ns.moneyIcons(6800))
-  check("winner rewritten plain",
-    line(4) == "- 12 Unstable Trigger  " .. ns.moneyIcons(6000))
-  check("winner line gold",
-    painted[4] ~= nil and painted[4][1] == 1
-    and painted[4][2] == 0.82 and painted[4][3] == 0)
-  check("loser line untouched color", painted[3] == nil)
+  check("loser untouched", line(3) == "- 8 Iron Strut")
+  check("winner tagged green",
+    line(4) == "- 12 Unstable Trigger" .. winTag)
   check("unpriced untouched", line(5) == "- 5 Mithril Casing")
   check("title untouched",
     line(1) == "Waylaid Crate: Expert Parts")
   ns.annotateCrateTip(tip)
-  check("no double rewrite",
-    line(3) == "- 8 Iron Strut  " .. ns.moneyIcons(6800)
-    and line(4) == "- 12 Unstable Trigger  " .. ns.moneyIcons(6000))
+  check("marked tooltip left alone",
+    line(4) == "- 12 Unstable Trigger" .. winTag)
 end
 
 -- 114b. Bundles packed into one multiline font string are rewritten in
@@ -3752,7 +3743,6 @@ do
   w.env["MultiTipTextLeft1"] = {
     GetText = function() return text end,
     SetText = function(_, s) text = s end,
-    SetTextColor = function() end,
   }
   w.env["MultiTipTextLeft2"] = {
     GetText = function() return "Waylaid Crate: Expert Parts" end,
@@ -3765,10 +3755,10 @@ do
     Show = function() end,
   }
   ns.annotateCrateTip(tip)
-  check("multiline rows rewritten",
+  check("multiline winner tagged",
     text == "Use: Fill the crate with any bundle from the following list:"
-      .. "\n- 8 Iron Strut  " .. ns.moneyIcons(6800)
-      .. "\n- 12 Unstable Trigger  " .. ns.moneyIcons(6000))
+      .. "\n- 8 Iron Strut\n- 12 Unstable Trigger  "
+      .. ns.colored(ns.COLORS.green, "Cheapest"))
 end
 
 -- 115. The live tooltip gains the answer line; the auction opt-out and
@@ -3792,15 +3782,14 @@ do
     end
     return out
   end
-  local painted = {}
   for i, t in ipairs(lines) do
     local text = t
     w.env["CrateTipTextLeft" .. i] = {
       GetText = function() return text end,
       SetText = function(_, s) text = s end,
-      SetTextColor = function(_, r, g, b) painted[i] = { r, g, b } end,
     }
   end
+  local winTag = "  " .. ns.colored(ns.COLORS.green, "Cheapest")
   local added, shown = {}, 0
   local tip = {
     GetName = function() return "CrateTip" end,
@@ -3818,15 +3807,11 @@ do
   } } }
   ns.annotateCrateTip(tip)
   local done = shownTexts()
-  check("cheapest line rewritten plain",
-    done[3] == "- 8 Iron Strut  " .. ns.moneyIcons(6800))
-  check("cheapest line gold",
-    painted[3] ~= nil and painted[3][1] == 1
-    and painted[3][2] == 0.82 and painted[3][3] == 0)
-  check("other lines rewritten plain",
-    done[4] == "- 5 Mithril Tube  " .. ns.moneyIcons(10275)
-    and done[6] == "- 5 Mithril Casing  " .. ns.moneyIcons(18080)
-    and painted[4] == nil and painted[6] == nil)
+  check("cheapest line tagged",
+    done[3] == "- 8 Iron Strut" .. winTag)
+  check("other lines untouched",
+    done[4] == "- 5 Mithril Tube"
+    and done[6] == "- 5 Mithril Casing")
   check("nothing appended", #added == 0)
   check("tooltip re-shown", shown == 1)
   ns.opts().compareAuction = false
@@ -3915,9 +3900,9 @@ do
     end,
   } } }
   reg[1].fn(tip)
-  check("post-call rewrites winner",
-    w.env["PostTipTextLeft3"].GetText()
-      == "- 8 Iron Strut  " .. ns.moneyIcons(6800))
+  check("post-call tags winner",
+    w.env["PostTipTextLeft3"].GetText() == "- 8 Iron Strut  "
+      .. ns.colored(ns.COLORS.green, "Cheapest"))
   check("post-call leaves unpriced",
     w.env["PostTipTextLeft4"].GetText() == "- 5 Mithril Tube")
 end
@@ -3971,6 +3956,15 @@ do
     and w.printed[m + 4] == "  tooltip owner: unknown")
   check("diag dumps both sides",
     w.printed[m + 5] == "  line 1: L=\"Solid Iron Maul\" R=(missing)")
+  w.env["DiagTipTextLeft3"] = { GetText = function()
+    return "- 8 Iron Strut  " .. ns.colored(ns.COLORS.green, "Cheapest")
+  end }
+  w.env.GameTooltip.NumLines = function() return #lines end
+  local k = #w.printed
+  ns.diagCrate()
+  check("diag names marked tooltips",
+    w.printed[k + 2]
+      == "|cff66ccffVocVendor|r: cheapest already marked on this tooltip")
   for i, t in ipairs(lines) do
     w.env["DiagTipTextLeft" .. i] = { GetText = function() return t end }
   end
