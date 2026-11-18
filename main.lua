@@ -291,6 +291,178 @@ function ns.compareItem(vendor, auction, deValue)
   if auctionNet > vendor then return "auction" end
   return "vendor"
 end
+-- ======= Waylaid Crates: cheapest fill =======
+-- Forever's Waylaid Crates each take any one listed bundle: "Use: Fill
+-- the crate with any bundle from the following list:" plus one "- qty
+-- material" line per bundle. The tooltip names the cheapest bundle by
+-- the latest pricing-guest data, reusing ns.getAuctionPrice, so the
+-- player buys the right materials. Keyed by material name: crate IDs
+-- shift between builds while Classic material IDs are stable; a name
+-- with no known ID stays unpriced and the line says so. Gated by
+-- compareAuction and silent without prices, so the tooltip never shows
+-- broken. Retail has no crates, so the hook simply never matches there.
+ns.CRATE_MATERIALS = {
+  -- Apprentice (level 10)
+  ["peacebloom"] = 2447, ["silverleaf"] = 765, ["earthroot"] = 2449,
+  ["mageroyal"] = 785, ["briarthorn"] = 2450,
+  ["copper ore"] = 2770, ["tin ore"] = 2771,
+  ["linen cloth"] = 2589, ["light leather"] = 2318,
+  ["strange dust"] = 10940, ["greater magic essence"] = 10939,
+  ["small glimmering shard"] = 10978, ["large glimmering shard"] = 11084,
+  ["cured light hide"] = 4231, ["bolt of linen cloth"] = 2996,
+  ["copper bar"] = 2840, ["tin bar"] = 3576, ["bronze bar"] = 2841,
+  ["handful of copper bolts"] = 4359, ["copper tube"] = 4361,
+  ["copper modulator"] = 4363,
+  -- Journeyman (level 10)
+  ["stranglekelp"] = 3820, ["bruiseweed"] = 2453,
+  ["wild steelbloom"] = 3355, ["grave moss"] = 3369, ["kingsblood"] = 3356,
+  ["silver ore"] = 2775, ["iron ore"] = 2772,
+  ["wool cloth"] = 2592, ["silk cloth"] = 4306, ["medium leather"] = 2319,
+  ["soul dust"] = 11083, ["greater astral essence"] = 11082,
+  ["small glowing shard"] = 11138, ["large glowing shard"] = 11139,
+  ["bolt of woolen cloth"] = 2997, ["bolt of silk cloth"] = 4305,
+  ["cured medium hide"] = 4233,
+  ["silver bar"] = 2842, ["iron bar"] = 3575,
+  ["bronze tube"] = 4371, ["whirring bronze gizmo"] = 4375,
+  ["bronze framework"] = 4382, ["gold power core"] = 10558,
+  -- Expert (level 20)
+  ["liferoot"] = 3357, ["fadeleaf"] = 3818, ["goldthorn"] = 3821,
+  ["khadgar's whisker"] = 3358,
+  ["wintersbite"] = 3819, ["firebloom"] = 4625, ["purple lotus"] = 8831,
+  ["arthas' tears"] = 8836,
+  ["gold ore"] = 2776, ["mithril ore"] = 3858,
+  ["mageweave cloth"] = 4338, ["heavy leather"] = 4234,
+  ["vision dust"] = 11137, ["greater mystic essence"] = 11135,
+  ["small radiant shard"] = 11177, ["large radiant shard"] = 11178,
+  ["bolt of mageweave"] = 4339, ["cured heavy hide"] = 4236,
+  ["mithril bar"] = 3860, ["steel bar"] = 3859, ["gold bar"] = 3577,
+  ["iron strut"] = 4387, ["mithril tube"] = 10559,
+  ["unstable trigger"] = 10560, ["mithril casing"] = 10561,
+  -- Artisan (level 35)
+  ["golden sansam"] = 13464, ["sungrass"] = 8838, ["blindweed"] = 8839,
+  ["ghost mushroom"] = 8845, ["gromsblood"] = 8846,
+  ["dreamfoil"] = 13463, ["mountain silversage"] = 13465,
+  ["plaguebloom"] = 13466, ["icecap"] = 13467,
+  ["truesilver ore"] = 7911, ["thorium ore"] = 10620,
+  ["dark iron ore"] = 11370,
+  ["runecloth"] = 14047, ["thick leather"] = 4304, ["rugged leather"] = 8170,
+  ["dream dust"] = 11176, ["greater nether essence"] = 11175,
+  ["small brilliant shard"] = 14343, ["large brilliant shard"] = 14344,
+  ["bolt of runecloth"] = 14048, ["cured thick hide"] = 8172,
+  ["dark iron bar"] = 11371, ["truesilver bar"] = 6037,
+  ["thorium bar"] = 12359,
+  ["thorium widget"] = 15994, ["truesilver transformer"] = 18631,
+  ["thorium tube"] = 16000,
+}
+-- One bundle line's quantity, display name, and material ID (nil when
+-- the name is unknown). Prefers an embedded item link when the client
+-- renders one, and falls back to the name table otherwise.
+local function crateBundleFrom(raw)
+  raw = tostring(raw or "")
+  local id = tonumber(raw:match("|Hitem:(%d+)"))
+  local plain = raw:gsub("|H.-|h%[(.-)%]|h", "%1")
+  plain = plain:gsub("|H.-|h(.-)|h", "%1"):gsub("|h", "")
+  plain = plain:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+  local qty, name = plain:match("^%s*%-?%s*(%d+)%s*(.-)%s*$")
+  if not qty then return nil end
+  name = name:gsub("^[xX]%s+", ""):gsub("^[^%w]+", "")
+  if name == "" then return nil end
+  if not id then id = ns.CRATE_MATERIALS[name:lower()] end
+  return tonumber(qty), name, id
+end
+-- Tooltip left-side lines to crate bundles, or nil when the tooltip is
+-- not a Waylaid Crate (or already carries our answer line).
+function ns.parseCrateBundles(lines)
+  if type(lines) ~= "table" then return nil end
+  local anchor = nil
+  for i, text in ipairs(lines) do
+    local t = tostring(text or ""):lower()
+    if t:find("cheapest fill:", 1, true) then return nil end
+    if not anchor and t:find("any bundle", 1, true) then anchor = i end
+  end
+  if not anchor then return nil end
+  local bundles = {}
+  for i = anchor + 1, #lines do
+    if #bundles >= 10 then break end
+    local qty, name, id = crateBundleFrom(lines[i])
+    if qty then
+      bundles[#bundles + 1] = { qty = qty, name = name, id = id }
+    elseif #bundles > 0
+      and tostring(lines[i] or ""):gsub("%s", "") ~= "" then
+      break
+    end
+  end
+  if #bundles == 0 then return nil end
+  return bundles
+end
+-- The cheapest bundle by full-bundle cost (unit price times quantity),
+-- or nil when nothing has a price. allPriced is false when some bundle
+-- could not be priced, so the tooltip can say so.
+function ns.crateCheapest(bundles, guests)
+  if type(bundles) ~= "table" or #bundles == 0 then return nil end
+  guests = guests or ns.priceGuests()
+  local best, bestTotal, priced = nil, nil, 0
+  for _, b in ipairs(bundles) do
+    local unit = b.id and ns.getAuctionPrice(nil, b.id, guests) or nil
+    if unit then
+      priced = priced + 1
+      local cost = unit * (tonumber(b.qty) or 1)
+      if not bestTotal or cost < bestTotal then
+        best, bestTotal = b, cost
+      end
+    end
+  end
+  if not best then return nil end
+  return best, bestTotal, priced == #bundles
+end
+-- The answer line plus an optional caveat, or nil when silent (no
+-- prices, or the auction compare is off).
+function ns.crateTooltipLines(bundles, guests)
+  local best, total, allPriced = ns.crateCheapest(bundles, guests)
+  if not best then return nil end
+  local line = "Cheapest fill: " .. tostring(best.qty) .. "x " .. best.name
+    .. " (" .. ns.moneyString(total) .. ")"
+  if allPriced then return line, nil end
+  return line, "Unpriced options may be cheaper"
+end
+-- Append the cheapest-fill line to a live item tooltip. Reads only,
+-- never reflows what is there, and re-shows so the line appears.
+function ns.annotateCrateTip(tip)
+  if type(tip) ~= "table" then return end
+  if not ns.opts().compareAuction then return end
+  if type(tip.NumLines) ~= "function" then return end
+  local okName, tname = pcall(tip.GetName, tip)
+  if not okName or type(tname) ~= "string" then return end
+  local okN, n = pcall(tip.NumLines, tip)
+  if not okN or type(n) ~= "number" then return end
+  local lines = {}
+  for i = 1, n do
+    local f = _G[tname .. "TextLeft" .. i]
+    local t = f and f.GetText and f:GetText()
+    lines[i] = t or ""
+  end
+  local bundles = ns.parseCrateBundles(lines)
+  if not bundles then return end
+  local line, hint = ns.crateTooltipLines(bundles)
+  if not line then return end
+  if type(tip.AddLine) ~= "function" then return end
+  pcall(tip.AddLine, tip, line, COLORS.text[1], COLORS.text[2], COLORS.text[3])
+  if hint then
+    pcall(tip.AddLine, tip, hint, COLORS.muted[1], COLORS.muted[2], COLORS.muted[3])
+  end
+  if type(tip.Show) == "function" then pcall(tip.Show, tip) end
+end
+-- One hook covers every item tooltip (bags, links, merchants); the
+-- anchor text matches only crate tooltips. Presence-gated and hooked
+-- once, like the macro hook.
+function ns.hookCrateTooltip()
+  if ns.crateHooked then return end
+  if type(GameTooltip) ~= "table" then return end
+  if type(GameTooltip.HookScript) ~= "function" then return end
+  local ok = pcall(GameTooltip.HookScript, GameTooltip, "OnTooltipSetItem",
+    function(self) ns.annotateCrateTip(self) end)
+  if ok then ns.crateHooked = true end
+end
 -- Losing consumables: one stack of the strongest per buff slot, the rest
 -- vendors. A category is a buff slot (food, flask, battle elixir, ...):
 -- two consumables in it never stack, so the strongest wins and every
@@ -3138,6 +3310,7 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1, arg2)
     ns.ensureSettings()
     ns.checkRivals() -- a same-job addon loaded before us stands us down
     ns.hookMacroFrame() -- the macro window may already be up
+    ns.hookCrateTooltip() -- Waylaid Crate tooltips gain the cheapest fill
   elseif event == "ADDON_LOADED" then
     ns.checkRivals() -- a same-job addon loaded after us does the same
     ns.hookMacroFrame() -- Blizzard_MacroUI loads on demand
@@ -3145,6 +3318,7 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1, arg2)
     ns.ensureSettings() -- in case Settings wasn't up at ADDON_LOADED
     ns.checkRivals()
     ns.hookMacroFrame()
+    ns.hookCrateTooltip()
     ns.updateUseMacros() -- bags are settled: point macros at winners
   elseif event == "MERCHANT_SHOW" then
     ns.onMerchantShow()

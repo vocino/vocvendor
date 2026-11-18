@@ -3583,4 +3583,177 @@ do
     ns.merchantRowHit[2] == false and w.merchantButtons[2].alpha == 0.35)
 end
 
+-- 111. Waylaid Crate tooltips parse the bundle block: the anchor plus
+-- one "- qty material" line per bundle, with Classic IDs resolved.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  local bundles = ns.parseCrateBundles({
+    "Waylaid Crate: Expert Parts",
+    "Use: Fill the crate with any bundle from the following list:",
+    "- 8 Iron Strut",
+    "- 5 Mithril Tube",
+    "- 12 Unstable Trigger",
+    "- 5 Mithril Casing",
+  })
+  check("four bundles parsed", bundles ~= nil and #bundles == 4)
+  check("first bundle", bundles[1].qty == 8
+    and bundles[1].name == "Iron Strut" and bundles[1].id == 4387)
+  check("second bundle", bundles[2].qty == 5
+    and bundles[2].name == "Mithril Tube" and bundles[2].id == 10559)
+  check("last bundle", bundles[4].qty == 5
+    and bundles[4].name == "Mithril Casing" and bundles[4].id == 10561)
+  check("no anchor means no crate",
+    ns.parseCrateBundles({ "Solid Iron Maul", "Vendor price 10s" }) == nil)
+  check("anchor without bundles is no crate",
+    ns.parseCrateBundles({
+      "Use: Fill the crate with any bundle from the following list:",
+    }) == nil)
+  check("annotated tooltips do not re-parse",
+    ns.parseCrateBundles({
+      "Use: Fill the crate with any bundle from the following list:",
+      "- 8 Iron Strut",
+      "Cheapest fill: 8x Iron Strut (68s 0c)",
+    }) == nil)
+  check("non-table is no crate", ns.parseCrateBundles(nil) == nil)
+end
+
+-- 112. Bundle lines prefer embedded item links and leave unknown names
+-- unpriced instead of dropping them.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  local bundles = ns.parseCrateBundles({
+    "Use: Fill the crate with any bundle from the following list:",
+    "- 8 |cffffffff|Hitem:4387::::::::::::|h[Iron Strut]|h|r",
+    "- 3 Future Widget",
+  })
+  check("link resolves the ID",
+    bundles ~= nil and #bundles == 2 and bundles[1].id == 4387
+    and bundles[1].qty == 8 and bundles[1].name == "Iron Strut")
+  check("unknown name stays unpriced",
+    bundles[2].id == nil and bundles[2].name == "Future Widget")
+end
+
+-- 113. Cheapest fill compares full-bundle cost (unit price times
+-- quantity), and reports whether every bundle had a price.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function(_, id)
+      return ({ [4387] = 850, [10559] = 2055,
+        [10560] = 2074, [10561] = 3616 })[id]
+    end,
+  } } }
+  local bundles = {
+    { qty = 8, name = "Iron Strut", id = 4387 }, -- 6800
+    { qty = 5, name = "Mithril Tube", id = 10559 }, -- 10275
+    { qty = 12, name = "Unstable Trigger", id = 10560 }, -- 24888
+    { qty = 5, name = "Mithril Casing", id = 10561 }, -- 18080
+  }
+  local best, total, allPriced = ns.crateCheapest(bundles)
+  check("cheapest bundle wins",
+    best ~= nil and best.name == "Iron Strut" and total == 6800)
+  check("all priced reported", allPriced == true)
+  bundles[4].id = 999999
+  best, total, allPriced = ns.crateCheapest(bundles)
+  check("unpriced bundle loses",
+    best ~= nil and best.name == "Iron Strut")
+  check("partial pricing reported", allPriced == false)
+  check("no prices means no answer",
+    ns.crateCheapest({ { qty = 1, name = "Ghost", id = nil } }) == nil)
+  check("no bundles means no answer", ns.crateCheapest({}) == nil)
+end
+
+-- 114. The tooltip line names the cheapest bundle with its full cost,
+-- and warns when unpriced options could beat it.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function(_, id)
+      return id == 4387 and 850 or nil
+    end,
+  } } }
+  local line, hint = ns.crateTooltipLines({
+    { qty = 8, name = "Iron Strut", id = 4387 },
+    { qty = 5, name = "Mithril Tube", id = 10559 },
+  })
+  check("answer names bundle and cost",
+    line == "Cheapest fill: 8x Iron Strut (68s 0c)")
+  check("partial prices warn", hint == "Unpriced options may be cheaper")
+  local full = ns.crateTooltipLines({ { qty = 8, name = "Iron Strut", id = 4387 } })
+  check("full prices stay quiet", full == "Cheapest fill: 8x Iron Strut (68s 0c)")
+  check("no prices stay silent",
+    ns.crateTooltipLines({ { qty = 1, name = "Ghost", id = nil } }) == nil)
+end
+
+-- 115. The live tooltip gains the answer line; the auction opt-out and
+-- missing prices stay silent.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local lines = {
+    "Waylaid Crate: Expert Parts",
+    "Use: Fill the crate with any bundle from the following list:",
+    "- 8 Iron Strut",
+    "- 5 Mithril Tube",
+    "- 12 Unstable Trigger",
+    "- 5 Mithril Casing",
+  }
+  for i, t in ipairs(lines) do
+    w.env["CrateTipTextLeft" .. i] = { GetText = function() return t end }
+  end
+  local added, shown = {}, 0
+  local tip = {
+    GetName = function() return "CrateTip" end,
+    NumLines = function() return #lines end,
+    AddLine = function(_, t) added[#added + 1] = t end,
+    Show = function() shown = shown + 1 end,
+  }
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function(_, id)
+      return ({ [4387] = 850, [10559] = 2055,
+        [10560] = 2074, [10561] = 3616 })[id]
+    end,
+  } } }
+  ns.annotateCrateTip(tip)
+  check("answer appended",
+    #added == 1 and added[1] == "Cheapest fill: 8x Iron Strut (68s 0c)")
+  check("tooltip re-shown", shown == 1)
+  ns.opts().compareAuction = false
+  added, shown = {}, 0
+  ns.annotateCrateTip(tip)
+  check("opt-out stays silent", #added == 0 and shown == 0)
+  ns.opts().compareAuction = true
+  w.env.Auctionator = nil
+  ns.annotateCrateTip(tip)
+  check("no prices stay silent", #added == 0 and shown == 0)
+  ns.annotateCrateTip(nil)
+  check("nil tooltip tolerated", true)
+end
+
+-- 116. The crate hook presence-gates like the macro hook and hooks once.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  w.env.GameTooltip = nil
+  ns.hookCrateTooltip()
+  check("missing tooltip tolerated", ns.crateHooked == nil)
+  w.env.GameTooltip = {}
+  ns.hookCrateTooltip()
+  check("missing HookScript tolerated", ns.crateHooked == nil)
+  local hooks = 0
+  w.env.GameTooltip = { HookScript = function(_, n)
+    hooks = hooks + 1
+    check("hooks item display", n == "OnTooltipSetItem")
+  end }
+  ns.hookCrateTooltip()
+  check("hooked once", ns.crateHooked == true and hooks == 1)
+  ns.hookCrateTooltip()
+  check("never re-hooked", hooks == 1)
+end
+
 print("ok - " .. passed .. " checks passed")
