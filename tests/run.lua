@@ -645,6 +645,18 @@ do
   check("money copper", ns.moneyString(89) == "89c")
   check("money zero", ns.moneyString(0) == "0c")
   check("money negative", ns.moneyString(-5) == "0c")
+  local G = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12:0:0|t"
+  local S = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12:0:0|t"
+  local C = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12:0:0|t"
+  check("icons copper", ns.moneyIcons(99) == "99 " .. C)
+  check("icons silver pads copper",
+    ns.moneyIcons(6800) == "68 " .. S .. " 00 " .. C)
+  check("icons gold pads both",
+    ns.moneyIcons(10275) == "1 " .. G .. " 02 " .. S .. " 75 " .. C)
+  check("icons unpadded tens",
+    ns.moneyIcons(18080) == "1 " .. G .. " 80 " .. S .. " 80 " .. C)
+  check("icons zero", ns.moneyIcons(0) == "0 " .. C)
+  check("icons negative", ns.moneyIcons(-5) == "0 " .. C)
 end
 
 -- 2b. The visit line counts every item sold, whatever pile it came
@@ -3612,10 +3624,20 @@ do
   check("annotated tooltips do not re-parse",
     ns.parseCrateBundles({
       "Use: Fill the crate with any bundle from the following list:",
-      "- 8 Iron Strut",
-      "Cheapest fill: 8x Iron Strut (68s 0c)",
+      "- 8 Iron Strut  68s 0c",
+      "- 5 Mithril Tube  1g 2s",
     }) == nil)
   check("non-table is no crate", ns.parseCrateBundles(nil) == nil)
+  local multi = ns.parseCrateBundles({
+    "Waylaid Crate: Expert Parts",
+    "Use: Fill the crate with any bundle from the following list:\n- 8 Iron Strut\n- 5 Mithril Tube",
+    "Requires Level 20",
+  })
+  check("bundles inside the anchor line",
+    multi ~= nil and #multi == 2
+    and multi[1].qty == 8 and multi[1].line == 2 and multi[1].seg == 2
+    and multi[2].name == "Mithril Tube" and multi[2].line == 2
+    and multi[2].seg == 3)
 end
 
 -- 112. Bundle lines prefer embedded item links and leave unknown names
@@ -3635,8 +3657,8 @@ do
     bundles[2].id == nil and bundles[2].name == "Future Widget")
 end
 
--- 113. Cheapest fill compares full-bundle cost (unit price times
--- quantity), and reports whether every bundle had a price.
+-- 113. Bundle costs are full-bundle cost (unit price times
+-- quantity), priced or nil each.
 do
   local w = newWorld()
   local ns = loadAddon(w)
@@ -3646,47 +3668,107 @@ do
         [10560] = 2074, [10561] = 3616 })[id]
     end,
   } } }
-  local bundles = {
+  local costs = ns.crateCosts({
     { qty = 8, name = "Iron Strut", id = 4387 }, -- 6800
     { qty = 5, name = "Mithril Tube", id = 10559 }, -- 10275
     { qty = 12, name = "Unstable Trigger", id = 10560 }, -- 24888
-    { qty = 5, name = "Mithril Casing", id = 10561 }, -- 18080
-  }
-  local best, total, allPriced = ns.crateCheapest(bundles)
-  check("cheapest bundle wins",
-    best ~= nil and best.name == "Iron Strut" and total == 6800)
-  check("all priced reported", allPriced == true)
-  bundles[4].id = 999999
-  best, total, allPriced = ns.crateCheapest(bundles)
-  check("unpriced bundle loses",
-    best ~= nil and best.name == "Iron Strut")
-  check("partial pricing reported", allPriced == false)
-  check("no prices means no answer",
-    ns.crateCheapest({ { qty = 1, name = "Ghost", id = nil } }) == nil)
-  check("no bundles means no answer", ns.crateCheapest({}) == nil)
+    { qty = 5, name = "Mithril Casing", id = 999999 },
+  })
+  check("four costs", costs ~= nil and #costs == 4)
+  check("bundle totals",
+    costs[1].cost == 6800 and costs[2].cost == 10275
+    and costs[3].cost == 24888)
+  check("unknown stays nil", costs[4].cost == nil)
+  check("no bundles stay nil", ns.crateCosts({}) == nil)
+  check("non-table stays nil", ns.crateCosts(nil) == nil)
 end
 
--- 114. The tooltip line names the cheapest bundle with its full cost,
--- and warns when unpriced options could beat it.
+-- 114. Priced bundle lines are rewritten in place with their cost;
+-- the cheapest gains a check mark, the rest an x, unpriced lines are
+-- untouched, and a marked tooltip is never rewritten twice.
 do
   local w = newWorld()
   local ns = loadAddon(w)
   w.env.Auctionator = { API = { v1 = {
     GetAuctionPriceByItemID = function(_, id)
-      return id == 4387 and 850 or nil
+      return ({ [4387] = 850, [10560] = 500 })[id]
     end,
   } } }
-  local line, hint = ns.crateTooltipLines({
-    { qty = 8, name = "Iron Strut", id = 4387 },
-    { qty = 5, name = "Mithril Tube", id = 10559 },
-  })
-  check("answer names bundle and cost",
-    line == "Cheapest fill: 8x Iron Strut (68s 0c)")
-  check("partial prices warn", hint == "Unpriced options may be cheaper")
-  local full = ns.crateTooltipLines({ { qty = 8, name = "Iron Strut", id = 4387 } })
-  check("full prices stay quiet", full == "Cheapest fill: 8x Iron Strut (68s 0c)")
-  check("no prices stay silent",
-    ns.crateTooltipLines({ { qty = 1, name = "Ghost", id = nil } }) == nil)
+  local texts = {
+    "Waylaid Crate: Expert Parts",
+    "Use: Fill the crate with any bundle from the following list:",
+    "- 8 Iron Strut",
+    "- 12 Unstable Trigger",
+    "- 5 Mithril Casing",
+  }
+  local tip = {
+    GetName = function() return "RewriteTip" end,
+    NumLines = function() return #texts end,
+    AddLine = function() end,
+    Show = function() end,
+  }
+  local painted = {}
+  for i, t in ipairs(texts) do
+    local text = t
+    w.env["RewriteTipTextLeft" .. i] = {
+      GetText = function() return text end,
+      SetText = function(_, s) text = s end,
+      SetTextColor = function(_, r, g, b) painted[i] = { r, g, b } end,
+    }
+  end
+  ns.annotateCrateTip(tip)
+  local function line(i)
+    return w.env["RewriteTipTextLeft" .. i].GetText()
+  end
+  check("loser rewritten plain",
+    line(3) == "- 8 Iron Strut  " .. ns.moneyIcons(6800))
+  check("winner rewritten plain",
+    line(4) == "- 12 Unstable Trigger  " .. ns.moneyIcons(6000))
+  check("winner line gold",
+    painted[4] ~= nil and painted[4][1] == 1
+    and painted[4][2] == 0.82 and painted[4][3] == 0)
+  check("loser line untouched color", painted[3] == nil)
+  check("unpriced untouched", line(5) == "- 5 Mithril Casing")
+  check("title untouched",
+    line(1) == "Waylaid Crate: Expert Parts")
+  ns.annotateCrateTip(tip)
+  check("no double rewrite",
+    line(3) == "- 8 Iron Strut  " .. ns.moneyIcons(6800)
+    and line(4) == "- 12 Unstable Trigger  " .. ns.moneyIcons(6000))
+end
+
+-- 114b. Bundles packed into one multiline font string are rewritten in
+-- place, each on its own row of the same string.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function(_, id)
+      return ({ [4387] = 850, [10560] = 500 })[id]
+    end,
+  } } }
+  local text = "Use: Fill the crate with any bundle from the following list:"
+    .. "\n- 8 Iron Strut\n- 12 Unstable Trigger"
+  w.env["MultiTipTextLeft1"] = {
+    GetText = function() return text end,
+    SetText = function(_, s) text = s end,
+    SetTextColor = function() end,
+  }
+  w.env["MultiTipTextLeft2"] = {
+    GetText = function() return "Waylaid Crate: Expert Parts" end,
+    SetText = function() end,
+  }
+  local tip = {
+    GetName = function() return "MultiTip" end,
+    NumLines = function() return 2 end,
+    AddLine = function() end,
+    Show = function() end,
+  }
+  ns.annotateCrateTip(tip)
+  check("multiline rows rewritten",
+    text == "Use: Fill the crate with any bundle from the following list:"
+      .. "\n- 8 Iron Strut  " .. ns.moneyIcons(6800)
+      .. "\n- 12 Unstable Trigger  " .. ns.moneyIcons(6000))
 end
 
 -- 115. The live tooltip gains the answer line; the auction opt-out and
@@ -3703,14 +3785,29 @@ do
     "- 12 Unstable Trigger",
     "- 5 Mithril Casing",
   }
+  local shownTexts = function()
+    local out = {}
+    for i in ipairs(lines) do
+      out[i] = w.env["CrateTipTextLeft" .. i].GetText()
+    end
+    return out
+  end
+  local painted = {}
   for i, t in ipairs(lines) do
-    w.env["CrateTipTextLeft" .. i] = { GetText = function() return t end }
+    local text = t
+    w.env["CrateTipTextLeft" .. i] = {
+      GetText = function() return text end,
+      SetText = function(_, s) text = s end,
+      SetTextColor = function(_, r, g, b) painted[i] = { r, g, b } end,
+    }
   end
   local added, shown = {}, 0
   local tip = {
     GetName = function() return "CrateTip" end,
     NumLines = function() return #lines end,
-    AddLine = function(_, t) added[#added + 1] = t end,
+    AddLine = function(_, t, r, g, b)
+      added[#added + 1] = { text = t, color = { r, g, b } }
+    end,
     Show = function() shown = shown + 1 end,
   }
   w.env.Auctionator = { API = { v1 = {
@@ -3720,17 +3817,26 @@ do
     end,
   } } }
   ns.annotateCrateTip(tip)
-  check("answer appended",
-    #added == 1 and added[1] == "Cheapest fill: 8x Iron Strut (68s 0c)")
+  local done = shownTexts()
+  check("cheapest line rewritten plain",
+    done[3] == "- 8 Iron Strut  " .. ns.moneyIcons(6800))
+  check("cheapest line gold",
+    painted[3] ~= nil and painted[3][1] == 1
+    and painted[3][2] == 0.82 and painted[3][3] == 0)
+  check("other lines rewritten plain",
+    done[4] == "- 5 Mithril Tube  " .. ns.moneyIcons(10275)
+    and done[6] == "- 5 Mithril Casing  " .. ns.moneyIcons(18080)
+    and painted[4] == nil and painted[6] == nil)
+  check("nothing appended", #added == 0)
   check("tooltip re-shown", shown == 1)
   ns.opts().compareAuction = false
-  added, shown = {}, 0
+  shown = 0
   ns.annotateCrateTip(tip)
-  check("opt-out stays silent", #added == 0 and shown == 0)
+  check("opt-out stays silent", shown == 0)
   ns.opts().compareAuction = true
   w.env.Auctionator = nil
   ns.annotateCrateTip(tip)
-  check("no prices stay silent", #added == 0 and shown == 0)
+  check("no guests stay silent", #added == 0)
   ns.annotateCrateTip(nil)
   check("nil tooltip tolerated", true)
 end
@@ -3748,12 +3854,196 @@ do
   local hooks = 0
   w.env.GameTooltip = { HookScript = function(_, n)
     hooks = hooks + 1
-    check("hooks item display", n == "OnTooltipSetItem")
+    check("hooks tooltip show", n == "OnShow")
   end }
   ns.hookCrateTooltip()
   check("hooked once", ns.crateHooked == true and hooks == 1)
   ns.hookCrateTooltip()
   check("never re-hooked", hooks == 1)
+end
+
+-- 116b. A failing hook records its error instead of swallowing it, so
+-- /vv crate can report it.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  w.env.GameTooltip = { HookScript = function() error("no hooks here") end }
+  ns.hookCrateTooltip()
+  check("failed hook stays off", ns.crateHooked == nil)
+  check("hook error kept",
+    type(ns.crateHookError) == "string"
+    and ns.crateHookError:find("no hooks here", 1, true) ~= nil)
+end
+
+-- 116c. Where the data processor exists, the hook is a post-call, and
+-- the registered callback rewrites a crate tooltip end to end.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.env.Enum.TooltipDataType = { Item = 42 }
+  local reg = {}
+  w.env.TooltipDataProcessor = { AddTooltipPostCall = function(dtype, fn)
+    reg[#reg + 1] = { dtype = dtype, fn = fn }
+  end }
+  w.env.GameTooltip = {}
+  ns.hookCrateTooltip()
+  check("post-call registered",
+    ns.crateHooked == true and #reg == 1 and reg[1].dtype == 42)
+  local texts = {
+    "Waylaid Crate: Expert Parts",
+    "Use: Fill the crate with any bundle from the following list:",
+    "- 8 Iron Strut",
+    "- 5 Mithril Tube",
+  }
+  for i, t in ipairs(texts) do
+    local text = t
+    w.env["PostTipTextLeft" .. i] = {
+      GetText = function() return text end,
+      SetText = function(_, s) text = s end,
+    }
+  end
+  local tip = {
+    GetName = function() return "PostTip" end,
+    NumLines = function() return #texts end,
+    AddLine = function() end,
+    Show = function() end,
+  }
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function(_, id)
+      return id == 4387 and 850 or nil
+    end,
+  } } }
+  reg[1].fn(tip)
+  check("post-call rewrites winner",
+    w.env["PostTipTextLeft3"].GetText()
+      == "- 8 Iron Strut  " .. ns.moneyIcons(6800))
+  check("post-call leaves unpriced",
+    w.env["PostTipTextLeft4"].GetText() == "- 5 Mithril Tube")
+end
+
+-- 117. /vv crate reports hook state, parsed bundles, and per-bundle
+-- prices; a crate with no priced bundle gains one muted hint when a
+-- pricing guest is installed, and stays silent without one.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local lines = {
+    "Waylaid Crate: Expert Parts",
+    "Use: Fill the crate with any bundle from the following list:",
+    "- 8 Iron Strut",
+    "- 5 Mithril Tube",
+  }
+  for i, t in ipairs(lines) do
+    w.env["DiagTipTextLeft" .. i] = { GetText = function() return t end }
+  end
+  w.env.GameTooltip = {
+    GetName = function() return "DiagTip" end,
+    NumLines = function() return #lines end,
+  }
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function(_, id)
+      return id == 4387 and 850 or nil
+    end,
+  } } }
+  ns.diagCrate()
+  check("diag names hook and setting",
+    w.printed[1] == "|cff66ccffVocVendor|r: crate hook off, auction compare on")
+  check("diag prices one bundle",
+    w.printed[2] == "  8x Iron Strut (68s 0c)")
+  check("diag names the dataless bundle",
+    w.printed[3] == "  5x Mithril Tube (no auction data)")
+  w.env.Auctionator = nil
+  local n = #w.printed
+  ns.diagCrate()
+  check("diag without guests still parses",
+    w.printed[n + 2] == "  8x Iron Strut (no auction data)")
+  for i in ipairs(lines) do w.env["DiagTipTextLeft" .. i] = nil end
+  w.env["DiagTipTextLeft1"] = { GetText = function() return "Solid Iron Maul" end }
+  w.env.GameTooltip.NumLines = function() return 1 end
+  local m = #w.printed
+  ns.diagCrate()
+  check("diag without a crate says so",
+    w.printed[m + 2] == "|cff66ccffVocVendor|r: hover a Waylaid Crate first")
+  check("diag names tooltip state",
+    w.printed[m + 3] == "  tooltip shown: unknown"
+    and w.printed[m + 4] == "  tooltip owner: unknown")
+  check("diag dumps both sides",
+    w.printed[m + 5] == "  line 1: L=\"Solid Iron Maul\" R=(missing)")
+  for i, t in ipairs(lines) do
+    w.env["DiagTipTextLeft" .. i] = { GetText = function() return t end }
+  end
+  w.env.GameTooltip.NumLines = function() return #lines end
+  local added = {}
+  local tip = {
+    GetName = function() return "DiagTip" end,
+    NumLines = function() return #lines end,
+    AddLine = function(_, t, r, g, b)
+      added[#added + 1] = { text = t, color = { r, g, b } }
+    end,
+    Show = function() end,
+  }
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return nil end,
+  } } }
+  ns.annotateCrateTip(tip)
+  check("no data gains one hint",
+    #added == 1
+    and added[1].text == "No auction prices yet (scan the auction house)")
+  check("hint is muted",
+    added[1].color[1] == 0.5 and added[1].color[2] == 0.5
+    and added[1].color[3] == 0.5)
+  w.env.Auctionator = nil
+  added = {}
+  ns.annotateCrateTip(tip)
+  check("no guests stay silent", #added == 0)
+end
+
+-- 118. Refused (secret) tooltip reads stay silent and never error:
+-- the line becomes blank before any string use touches it.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.denySecrets = true -- canaccessvalue refuses every read, like secrets
+  local lines = {
+    "Waylaid Crate: Expert Parts",
+    "Use: Fill the crate with any bundle from the following list:",
+    "- 8 Iron Strut",
+  }
+  for i, t in ipairs(lines) do
+    local text = t
+    w.env["SecTipTextLeft" .. i] = {
+      GetText = function() return text end,
+      SetText = function(_, s) text = s end,
+    }
+  end
+  local added, shown = {}, 0
+  local tip = {
+    GetName = function() return "SecTip" end,
+    NumLines = function() return #lines end,
+    AddLine = function(_, t) added[#added + 1] = t end,
+    Show = function() shown = shown + 1 end,
+  }
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return 850 end,
+  } } }
+  ns.annotateCrateTip(tip) -- must not error
+  check("refused lines stay silent", #added == 0 and shown == 0)
+  check("refused lines unread",
+    w.env["SecTipTextLeft3"].GetText() == "- 8 Iron Strut")
+  w.env.GameTooltip = {
+    GetName = function() return "SecTip" end,
+    NumLines = function() return #lines end,
+  }
+  local n = #w.printed
+  ns.diagCrate() -- must not error
+  check("diag reports nothing to parse",
+    w.printed[n + 2] == "|cff66ccffVocVendor|r: hover a Waylaid Crate first")
+  check("diag never quotes refused reads",
+    w.printed[n + 5] == "  line 1: L=(secret) R=(missing)"
+    and w.printed[n + 7] == "  line 3: L=(secret) R=(missing)")
 end
 
 print("ok - " .. passed .. " checks passed")

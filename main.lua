@@ -206,6 +206,26 @@ function ns.moneyString(copper)
   if s > 0 then return string.format("%ds %dc", s, c) end
   return string.format("%dc", c)
 end
+-- The same cost with coin icons, matching Auctionator's own tooltip
+-- lines piece for piece (same icons, sizes, and zero padding).
+function ns.moneyIcons(copper)
+  copper = math.floor(tonumber(copper) or 0)
+  if copper < 0 then copper = 0 end
+  local g = math.floor(copper / 10000)
+  local s = math.floor((copper % 10000) / 100)
+  local c = copper % 100
+  local goldIcon = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12:0:0|t"
+  local silverIcon = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12:0:0|t"
+  local copperIcon = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12:0:0|t"
+  local result = c .. " " .. copperIcon
+  if (g ~= 0 or s ~= 0) and c < 10 then result = "0" .. result end
+  if s ~= 0 or g ~= 0 then
+    result = s .. " " .. silverIcon .. " " .. result
+  end
+  if g ~= 0 and s < 10 then result = "0" .. result end
+  if g ~= 0 then result = g .. " " .. goldIcon .. " " .. result end
+  return result
+end
 
 -- ======= Auction math =======
 -- Auction math: vendor vs auction vs disenchant-then-auction. Other
@@ -370,98 +390,306 @@ local function crateBundleFrom(raw)
   if not id then id = ns.CRATE_MATERIALS[name:lower()] end
   return tonumber(qty), name, id
 end
--- Tooltip left-side lines to crate bundles, or nil when the tooltip is
--- not a Waylaid Crate (or already carries our answer line).
+-- One font string can hold several visual rows separated by newlines
+-- (the crate's whole bundle list lives inside its Use line), so split
+-- each line into segments first, remembering each segment's line and
+-- position for the rewrite.
+local function splitTooltipLine(raw)
+  local t = tostring(raw or ""):gsub("\r", "")
+  local parts = {}
+  local start = 1
+  while true do
+    local nl = t:find("\n", start, true)
+    if not nl then
+      parts[#parts + 1] = t:sub(start)
+      break
+    end
+    parts[#parts + 1] = t:sub(start, nl - 1)
+    start = nl + 1
+  end
+  return parts
+end
+-- True when a tooltip already carries our costs: a bundle-shaped
+-- segment ending in a money total. Pristine Blizzard lines never do,
+-- so re-entry never appends costs twice.
+local function tooltipMarked(lines)
+  for _, text in ipairs(lines or {}) do
+    for _, piece in ipairs(splitTooltipLine(tostring(text or ""))) do
+      if crateBundleFrom(piece)
+        and (piece:find(" %d+c$")
+          or piece:find(" %d+s %d+c$")
+          or piece:find(" %d+g %d+s$")) then
+        return true
+      end
+    end
+  end
+  return false
+end
+-- Tooltip lines to crate bundles, or nil when the tooltip is not a
+-- Waylaid Crate. Each bundle keeps its tooltip line number (several
+-- bundles can share one line) so the annotation can rewrite that line.
+-- Costs already present mean the whole tooltip is done, so re-entry
+-- never appends costs twice.
 function ns.parseCrateBundles(lines)
   if type(lines) ~= "table" then return nil end
-  local anchor = nil
+  if tooltipMarked(lines) then return nil end
+  local segs = {}
   for i, text in ipairs(lines) do
-    local t = tostring(text or ""):lower()
-    if t:find("cheapest fill:", 1, true) then return nil end
-    if not anchor and t:find("any bundle", 1, true) then anchor = i end
+    local t = tostring(text or "")
+    local parts = splitTooltipLine(t)
+    for j, piece in ipairs(parts) do
+      segs[#segs + 1] = { text = piece, line = i, seg = j }
+    end
+  end
+  local anchor = nil
+  for i, s in ipairs(segs) do
+    if s.text:lower():find("any bundle", 1, true) then anchor = i break end
   end
   if not anchor then return nil end
   local bundles = {}
-  for i = anchor + 1, #lines do
+  for i = anchor + 1, #segs do
     if #bundles >= 10 then break end
-    local qty, name, id = crateBundleFrom(lines[i])
+    local qty, name, id = crateBundleFrom(segs[i].text)
     if qty then
-      bundles[#bundles + 1] = { qty = qty, name = name, id = id }
+      bundles[#bundles + 1] = { qty = qty, name = name, id = id,
+        line = segs[i].line, seg = segs[i].seg }
     elseif #bundles > 0
-      and tostring(lines[i] or ""):gsub("%s", "") ~= "" then
+      and segs[i].text:gsub("%s", "") ~= "" then
       break
     end
   end
   if #bundles == 0 then return nil end
   return bundles
 end
--- The cheapest bundle by full-bundle cost (unit price times quantity),
--- or nil when nothing has a price. allPriced is false when some bundle
--- could not be priced, so the tooltip can say so.
-function ns.crateCheapest(bundles, guests)
+-- Every bundle with its full-bundle cost (unit price times quantity),
+-- cost nil when the bundle has no price.
+function ns.crateCosts(bundles, guests)
   if type(bundles) ~= "table" or #bundles == 0 then return nil end
   guests = guests or ns.priceGuests()
-  local best, bestTotal, priced = nil, nil, 0
+  local costs = {}
   for _, b in ipairs(bundles) do
     local unit = b.id and ns.getAuctionPrice(nil, b.id, guests) or nil
-    if unit then
-      priced = priced + 1
-      local cost = unit * (tonumber(b.qty) or 1)
-      if not bestTotal or cost < bestTotal then
-        best, bestTotal = b, cost
-      end
-    end
+    costs[#costs + 1] = { bundle = b,
+      cost = unit and unit * (tonumber(b.qty) or 1) or nil }
   end
-  if not best then return nil end
-  return best, bestTotal, priced == #bundles
+  return costs
 end
--- The answer line plus an optional caveat, or nil when silent (no
--- prices, or the auction compare is off).
-function ns.crateTooltipLines(bundles, guests)
-  local best, total, allPriced = ns.crateCheapest(bundles, guests)
-  if not best then return nil end
-  local line = "Cheapest fill: " .. tostring(best.qty) .. "x " .. best.name
-    .. " (" .. ns.moneyString(total) .. ")"
-  if allPriced then return line, nil end
-  return line, "Unpriced options may be cheaper"
-end
--- Append the cheapest-fill line to a live item tooltip. Reads only,
--- never reflows what is there, and re-shows so the line appears.
-function ns.annotateCrateTip(tip)
-  if type(tip) ~= "table" then return end
-  if not ns.opts().compareAuction then return end
-  if type(tip.NumLines) ~= "function" then return end
+-- Tooltip name and line count, or nil when unreadable.
+function ns.tipSize(tip)
+  if type(tip) ~= "table" then return nil end
+  if type(tip.NumLines) ~= "function" then return nil end
   local okName, tname = pcall(tip.GetName, tip)
-  if not okName or type(tname) ~= "string" then return end
+  if not okName or type(tname) ~= "string" then return nil end
   local okN, n = pcall(tip.NumLines, tip)
-  if not okN or type(n) ~= "number" then return end
+  if not okN or type(n) ~= "number" then return nil end
+  return tname, n
+end
+-- Text lines of one side of a live tooltip, or nil when unreadable.
+-- Secret lines (Midnight) error on any string use and taint execution,
+-- so a refused read becomes a blank line here, the way refused stats
+-- stay unranked; without the API there is nothing to refuse.
+function ns.tooltipLines(tip, side)
+  local tname, n = ns.tipSize(tip)
+  if not tname then return nil end
   local lines = {}
   for i = 1, n do
-    local f = _G[tname .. "TextLeft" .. i]
+    local f = _G[tname .. (side or "TextLeft") .. i]
     local t = f and f.GetText and f:GetText()
+    -- type() is safe on secrets; every comparison after it is not, so
+    -- the access check owns the line before anything else touches it.
+    if type(t) == "string" and canaccessvalue and not canaccessvalue(t) then
+      t = ""
+    end
     lines[i] = t or ""
   end
+  return lines
+end
+-- Left-side font strings of a live tooltip, same indices as
+-- ns.tooltipLines: entries with no settable text stay nil.
+function ns.tooltipFrames(tip)
+  local tname, n = ns.tipSize(tip)
+  if not tname then return nil end
+  local frames = {}
+  for i = 1, n do
+    local f = _G[tname .. "TextLeft" .. i]
+    if f and f.GetText and f.SetText then frames[i] = f end
+  end
+  return frames
+end
+-- Rewrite each priced bundle line in place with its auction cost,
+-- leaving Blizzard's own text untouched, and paint the winner's line
+-- gold. Unpriced lines stay exactly as Blizzard wrote them. A crate
+-- with no priced bundle gains one muted
+-- hint instead, but only when a pricing guest is installed: without
+-- one nothing could ever price it, so silence stays silence.
+function ns.annotateCrateTip(tip)
+  if not ns.opts().compareAuction then return end
+  local lines = ns.tooltipLines(tip)
+  if not lines then return end
   local bundles = ns.parseCrateBundles(lines)
   if not bundles then return end
-  local line, hint = ns.crateTooltipLines(bundles)
-  if not line then return end
+  local costs = ns.crateCosts(bundles)
+  if not costs then return end
+  local best = nil
+  for _, c in ipairs(costs) do
+    if c.cost and (not best or c.cost < best.cost) then best = c end
+  end
   if type(tip.AddLine) ~= "function" then return end
-  pcall(tip.AddLine, tip, line, COLORS.text[1], COLORS.text[2], COLORS.text[3])
-  if hint then
-    pcall(tip.AddLine, tip, hint, COLORS.muted[1], COLORS.muted[2], COLORS.muted[3])
+  if best then
+    local frames = ns.tooltipFrames(tip)
+    if not frames then return end
+    local perLine = {}
+    for _, c in ipairs(costs) do
+      if c.cost then
+        local L = c.bundle.line
+        perLine[L] = perLine[L] or {}
+        perLine[L][#perLine[L] + 1] = c
+      end
+    end
+    for L, list in pairs(perLine) do
+      local fr = frames[L]
+      if fr and fr.SetText then
+        local parts = splitTooltipLine(lines[L])
+        for _, c in ipairs(list) do
+          local p = parts[c.bundle.seg]
+          if p then
+            parts[c.bundle.seg] = p .. "  " .. ns.moneyIcons(c.cost)
+          end
+        end
+        if pcall(fr.SetText, fr, table.concat(parts, "\n"))
+          and best.bundle.line == L and fr.SetTextColor then
+          pcall(fr.SetTextColor, fr,
+            COLORS.gold[1], COLORS.gold[2], COLORS.gold[3])
+        end
+      end
+    end
+  else
+    local guests = ns.priceGuests()
+    if not (guests.auctionator or guests.oribos) then return end
+    pcall(tip.AddLine, tip, "No auction prices yet (scan the auction house)",
+      COLORS.muted[1], COLORS.muted[2], COLORS.muted[3])
   end
   if type(tip.Show) == "function" then pcall(tip.Show, tip) end
 end
+-- Per-line readability of one side of a live tooltip for diagnostics.
+-- "text" lines are safe to quote; "secret" lines are refused reads
+-- (never touched, never printed); anything else is blank or missing.
+function ns.tooltipLineStatus(tip, side)
+  local tname, n = ns.tipSize(tip)
+  if not tname then return nil end
+  local status = {}
+  for i = 1, n do
+    local f = _G[tname .. (side or "TextLeft") .. i]
+    local t = f and f.GetText and f:GetText()
+    if type(t) ~= "string" then
+      status[i] = "missing"
+    elseif canaccessvalue and not canaccessvalue(t) then
+      status[i] = "secret"
+    elseif t:gsub("%s", "") == "" then
+      status[i] = "blank"
+    else
+      status[i] = "text"
+    end
+  end
+  return status
+end
+-- Diagnose the hovered crate in chat: hook state, parsed bundles, and
+-- each bundle's auction price or why it has none. When the tooltip is
+-- not a crate, dump what is actually there (never quoting refused
+-- reads) so a silent tooltip explains itself. Facts for a bug report
+-- instead of memory, like /vv diag and /vv why.
+function ns.diagCrate()
+  ns.say("crate hook " .. (ns.crateHooked and "on" or "off")
+    .. ", auction compare "
+    .. (ns.opts().compareAuction and "on" or "off"))
+  if not ns.crateHooked and ns.crateHookError then
+    print("  hook error: " .. tostring(ns.crateHookError))
+  end
+  local lines = nil
+  if type(GameTooltip) == "table" then lines = ns.tooltipLines(GameTooltip) end
+  if not lines then
+    ns.say("no game tooltip to read")
+    return
+  end
+  local bundles = ns.parseCrateBundles(lines)
+  if not bundles then
+    ns.say("hover a Waylaid Crate first")
+    local gt = GameTooltip
+    local shownOk, shown = pcall(gt.IsShown, gt)
+    print("  tooltip shown: "
+      .. ((shownOk and shown) and "yes" or (shownOk and "no" or "unknown")))
+    local ownerOk, owner = pcall(gt.GetOwner, gt)
+    local ownerName = "unknown"
+    if ownerOk and type(owner) == "table"
+      and type(owner.GetName) == "function" then
+      local okN, nm = pcall(owner.GetName, owner)
+      if okN and type(nm) == "string" and nm ~= "" then ownerName = nm end
+    end
+    print("  tooltip owner: " .. ownerName)
+    local left = lines
+    local right = ns.tooltipLines(gt, "TextRight")
+    local statusL = ns.tooltipLineStatus(gt, "TextLeft")
+    local statusR = ns.tooltipLineStatus(gt, "TextRight")
+    if statusL then
+      for i = 1, math.min(#statusL, 12) do
+        local function show(which, st, src)
+          if st == "text" then
+            return "\"" .. tostring((src or {})[i] or ""):sub(1, 120) .. "\""
+          end
+          return "(" .. tostring(st) .. ")"
+        end
+        local r = statusR and statusR[i] or "missing"
+        print("  line " .. i .. ": L=" .. show("L", statusL[i], left)
+          .. " R=" .. show("R", r, right))
+      end
+    end
+    return
+  end
+  local guests = ns.priceGuests()
+  for _, b in ipairs(bundles) do
+    local unit = b.id and ns.getAuctionPrice(nil, b.id, guests) or nil
+    local what = "  " .. tostring(b.qty) .. "x " .. b.name
+    if unit then
+      print(what .. " (" .. ns.moneyString(unit * b.qty) .. ")")
+    elseif not b.id then
+      print(what .. " (unknown material)")
+    else
+      print(what .. " (no auction data)")
+    end
+  end
+end
 -- One hook covers every item tooltip (bags, links, merchants); the
--- anchor text matches only crate tooltips. Presence-gated and hooked
--- once, like the macro hook.
+-- anchor text matches only crate tooltips. The data-processor post-call
+-- runs once the item lines are final; a Show hook can run on lines the
+-- data handler has not applied yet (and OnTooltipSetItem cannot be
+-- hooked on this client at all). Older clients without the processor
+-- keep the Show hook, where SetX fills lines synchronously.
+-- Presence-gated and hooked once, like the macro hook.
 function ns.hookCrateTooltip()
   if ns.crateHooked then return end
   if type(GameTooltip) ~= "table" then return end
+  if type(TooltipDataProcessor) == "table"
+    and type(TooltipDataProcessor.AddTooltipPostCall) == "function"
+    and type(Enum) == "table" and type(Enum.TooltipDataType) == "table"
+    and Enum.TooltipDataType.Item ~= nil then
+    local ok, err = pcall(TooltipDataProcessor.AddTooltipPostCall,
+      Enum.TooltipDataType.Item,
+      function(tip) ns.annotateCrateTip(tip) end)
+    if ok then
+      ns.crateHooked = true
+    else
+      ns.crateHookError = tostring(err)
+    end
+    return
+  end
   if type(GameTooltip.HookScript) ~= "function" then return end
-  local ok = pcall(GameTooltip.HookScript, GameTooltip, "OnTooltipSetItem",
+  local ok, err = pcall(GameTooltip.HookScript, GameTooltip, "OnShow",
     function(self) ns.annotateCrateTip(self) end)
-  if ok then ns.crateHooked = true end
+  if ok then
+    ns.crateHooked = true
+  else
+    ns.crateHookError = tostring(err)
+  end
 end
 -- Losing consumables: one stack of the strongest per buff slot, the rest
 -- vendors. A category is a buff slot (food, flask, battle elixir, ...):
@@ -3203,6 +3431,7 @@ ns.HELP = {
   "/vv protect       keep an item out of every sale",
   "/vv diag          show consumable ranks",
   "/vv why           explain each gear verdict",
+  "/vv crate         explain the hovered crate's cheapest fill",
   "/vv dismiss-new   clear all New tags",
   "/vv config        open Settings > AddOns > VocVendor",
   "/vv help          this list (/vocvendor works too)",
@@ -3276,6 +3505,8 @@ SlashCmdList.VOCVENDOR = function(msg)
     ns.diagConsumables()
   elseif msg == "why" then
     ns.diagOldGear()
+  elseif msg == "crate" then
+    ns.diagCrate()
   elseif msg == "dismiss-new" then
     ns.dismissNew()
   elseif msg == "config" then
