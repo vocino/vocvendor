@@ -1104,7 +1104,7 @@ do
   check("autoSell setting", w.env.Settings and w.settingsReg["VocVendor_autoSell"] ~= nil)
   check("gap slider", w.settingsSliders == 1)
   check("gap default", w.settingsReg["VocVendor_oldGearIlvlGap"].default == 30)
-  check("checkboxes", w.settingsChecks == 24)
+  check("checkboxes", w.settingsChecks == 25)
   check("use macros setting", w.settingsReg["VocVendor_useMacros"] ~= nil)
   check("use macros default off", w.settingsReg["VocVendor_useMacros"].default == false)
   check("legion setting", w.settingsReg["VocVendor_sellLegion"] ~= nil)
@@ -1115,6 +1115,8 @@ do
   check("keep default", w.settingsReg["VocVendor_keepDisenchantable"].default == true)
   check("compare setting", w.settingsReg["VocVendor_compareAuction"] ~= nil)
   check("compare default", w.settingsReg["VocVendor_compareAuction"].default == true)
+  check("vendor wins setting", w.settingsReg["VocVendor_sellVendorWins"] ~= nil)
+  check("vendor wins default off", w.settingsReg["VocVendor_sellVendorWins"].default == false)
 end
 
 -- 28. Compartment click opens the addon's Settings category.
@@ -3646,6 +3648,270 @@ do
   local mixed = use(w, { sub = SC.Itemenhancement, price = 100,
     desc = "use: permanently increase the attack power value by 6 and armor value by 24." })
   check("mixed enhancement keeps", ns.consumableCategory(mixed) == nil)
+end
+
+-- 112. Vendor wins is opt-in, stays off silently for returning players,
+-- and needs price data even when on.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  check("vendor wins default off", ns.opts().sellVendorWins == false)
+  check("vendor wins manual opt-in", ns.MANUAL_OPT_IN.sellVendorWins == true)
+  check("collect disabled by default", #ns.collectVendorWins() == 0)
+  ns.opts().sellVendorWins = true
+  check("no guests means nothing qualifies", #ns.collectVendorWins() == 0)
+  local o = newWorld()
+  o.savedVars = { autoSell = false } -- an old DB missing the newer key
+  local nso = loadAddon(o)
+  o.env.GetServerTime = function() return 2000000 end
+  clientLoaded(o)
+  nso.opts()
+  check("vendor wins stays off for returners", nso.opts().sellVendorWins == false)
+  check("vendor wins untagged", nso.db.newSeen.sellVendorWins == nil)
+  check("vendor wins never announced",
+    not table.concat(o.printed, "\n"):find("sellVendorWins", 1, true))
+end
+
+-- 113. Vendor-wins collection: strictly above the auction net sells,
+-- ties and missing data keep. The 5% cut decides the close ones.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().sellVendorWins = true
+  local function mat(price)
+    return gear(w, { slot = "", classID = 7, price = price, rarity = 1 })
+  end
+  local win = mat(1000)   -- vendor 1000 vs 500 gross (475 net): wins
+  local lose = mat(1000)  -- vendor 1000 vs 2000 gross (1900 net): loses
+  local fee = mat(1000)   -- vendor 1000 vs 1052 gross (999 net): the cut flips it
+  local tie = mat(1000)   -- vendor 1000 vs 1053 gross (1000 net): tie keeps
+  local nodata = mat(1000)
+  putBag(w, win)
+  putBag(w, lose)
+  putBag(w, fee)
+  putBag(w, tie)
+  putBag(w, nodata)
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function(_, id)
+      if id == w.itemIDs[win] then return 500 end
+      if id == w.itemIDs[lose] then return 2000 end
+      if id == w.itemIDs[fee] then return 1052 end
+      if id == w.itemIDs[tie] then return 1053 end
+      return nil
+    end,
+  } } }
+  local found = {}
+  for _, it in ipairs(ns.collectVendorWins()) do found[it.link] = true end
+  check("vendor-better collected", found[win] == true)
+  check("fee-flipped collected", found[fee] == true)
+  check("auction-better kept", found[lose] == nil)
+  check("tie keeps", found[tie] == nil)
+  check("no data keeps", found[nodata] == nil)
+end
+
+-- 114. Keep gates hold for vendor wins: protected, set, refused,
+-- quest, collectible, gray, heirloom, tool, consumable, BoE, Warbound,
+-- and kept disenchantables never qualify on price alone.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().sellVendorWins = true
+  -- Every candidate vendors at 1000 against an auction net of 95.
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return 100 end,
+  } } }
+  local function mat(o)
+    o = o or {}
+    if o.slot == nil then o.slot = "" end
+    if o.classID == nil then o.classID = 7 end
+    o.price = 1000
+    if o.rarity == nil then o.rarity = 1 end
+    return gear(w, o)
+  end
+  local plain = mat()
+  putBag(w, plain)
+  local guarded = mat()
+  putBag(w, guarded)
+  ns.toggleProtect(guarded)
+  local setGear = mat()
+  local sb, ss = putBag(w, setGear)
+  w.equipSets[sb .. ":" .. ss] = true
+  local refused = mat()
+  local rb, rs = putBag(w, refused)
+  w.noValues[rb .. ":" .. rs] = true
+  local live = mat({ classID = 12 })
+  putBag(w, live)
+  local toy = mat()
+  putBag(w, toy)
+  w.toyInfo[w.itemIDs[toy]] = 1
+  local gray = mat({ rarity = 0 })
+  putBag(w, gray)
+  local heir = mat({ rarity = 7 })
+  putBag(w, heir)
+  local WSC = w.env.Enum.ItemWeaponSubclass.Fishingpole
+  local pole = mat({ slot = "INVTYPE_2HWEAPON", classID = 2, sub = WSC })
+  putBag(w, pole)
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local flask = use(w, { sub = SC.Flasksphials, price = 1000,
+    desc = "use: increases strength by 300." })
+  putBag(w, flask)
+  local boe = mat({ bindType = 2 })
+  putBag(w, boe)
+  local warb = mat({ warbound = true })
+  putBag(w, warb)
+  local function found(link)
+    for _, it in ipairs(ns.collectVendorWins()) do
+      if it.link == link then return true end
+    end
+    return false
+  end
+  check("price winner collected", found(plain) == true)
+  check("protected keeps", found(guarded) == false)
+  check("equipment set keeps", found(setGear) == false)
+  check("refused slot keeps", found(refused) == false)
+  check("live quest keeps", found(live) == false)
+  check("unowned toy keeps", found(toy) == false)
+  check("gray never qualifies", found(gray) == false)
+  check("heirloom never qualifies", found(heir) == false)
+  check("profession tool keeps", found(pole) == false)
+  check("consumable defers to its sale", found(flask) == false)
+  check("BoE excluded by default", found(boe) == false)
+  check("Warbound excluded by default", found(warb) == false)
+  ns.opts().oldGearBoE = true
+  ns.opts().oldGearWarbound = true
+  check("BoE included when opted in", found(boe) == true)
+  check("Warbound included when opted in", found(warb) == true)
+  -- Enchanter with the keep on: epic gear diverts, whatever the price.
+  w.canDE = true
+  local epic = gear(w, { slot = "INVTYPE_HEAD", price = 1000 })
+  putBag(w, epic)
+  check("kept disenchantable diverts", found(epic) == false)
+  ns.opts().keepDisenchantable = false
+  check("keep off includes it", found(epic) == true)
+  w.env.Auctionator.API.v1.GetDisenchantPriceByItemID = function() return 50000 end
+  check("disenchant net above vendor holds", found(epic) == false)
+end
+
+-- 115. The vendor-wins sale counts whole stacks, holds what the auction
+-- re-prices at the click, and honors a protection marked after collect.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().sellVendorWins = true
+  local stack = gear(w, { slot = "", classID = 7, price = 100, rarity = 1 })
+  local sb, ss = putStack(w, stack, 3)
+  local single = gear(w, { slot = "", classID = 7, price = 100, rarity = 1 })
+  local gb, gs = putBag(w, single)
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return 10 end,
+  } } }
+  local n, value, leftover = ns.sellVendorWinsItems({
+    { link = stack, bag = sb, slot = ss, price = 100, count = 3 },
+    { link = single, bag = gb, slot = gs, price = 100, count = 1 },
+  })
+  check("stacks count fully", n == 4 and value == 400)
+  check("both slots sold", #w.sold == 2)
+  check("nothing left behind", #leftover == 0)
+  -- Data changing between collect and click holds the item by name.
+  local w2 = newWorld()
+  local ns2 = loadAddon(w2)
+  clientLoaded(w2)
+  local rich = gear(w2, { slot = "", classID = 7, price = 100, rarity = 1 })
+  local rb, rs = putBag(w2, rich)
+  w2.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return 50000 end,
+  } } }
+  local n2, _, left2 = ns2.sellVendorWinsItems({
+    { link = rich, bag = rb, slot = rs, price = 100, count = 1 },
+  })
+  check("repriced item held", n2 == 0 and #w2.sold == 0)
+  check("hold names the auction net",
+    #left2 == 1
+    and left2[1].reason:find("auction worth more", 1, true) ~= nil
+    and left2[1].reason:find("4g 75s net", 1, true) ~= nil)
+  ns2.toggleProtect(rich)
+  local _, _, left3 = ns2.sellVendorWinsItems({
+    { link = rich, bag = rb, slot = rs, price = 100, count = 1 },
+  })
+  check("late protection holds", left3[1].reason == "protected")
+end
+
+-- 116. Vendor wins rides the visit: silent when off, one combined line
+-- when on, and the manual dry-run names it without touching the
+-- grays-only path.
+do
+  local w = newWorld()
+  w.repairCan = false
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  putBag(w, gear(w, { slot = "", classID = 7, price = 1000, rarity = 1 }))
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return 100 end,
+  } } }
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("opt-out sells nothing extra", #w.sold == 0)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("opt-out silent", #w.printed == 0)
+  ns.opts().sellVendorWins = true
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("opt-in sells the winner", #w.sold == 1)
+  w.frame.onEvent(nil, "MERCHANT_CLOSED")
+  check("opt-in visit line",
+    w.printed[1] == "|cff66ccffVocVendor|r: sold 1 item for 10s 0c")
+  -- A slot claimed by old gear sells once, never twice.
+  local c = newWorld()
+  c.repairCan = false
+  local nsc = loadAddon(c)
+  clientLoaded(c)
+  nsc.opts().junkOldGear = true
+  nsc.opts().sellVendorWins = true
+  c.equipped[1] = gear(c, { slot = "INVTYPE_HEAD", level = 400 })
+  putBag(c, gear(c, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  c.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return 100 end,
+  } } }
+  c.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("claimed slot sells once", #c.sold == 1)
+  check("no double-sell leftover", #c.printed == 0)
+  -- Manual dry-run: header, row, popup data, and confirm.
+  local m = newWorld()
+  local nsm = loadAddon(m)
+  clientLoaded(m)
+  nsm.opts().sellVendorWins = true
+  nsm.opts().autoSell = false
+  nsm.opts().autoRepair = false
+  local mat = gear(m, { slot = "", classID = 7, price = 1200, rarity = 1 })
+  putBag(m, mat)
+  m.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return 100 end,
+  } } }
+  m.frame.onEvent(nil, "MERCHANT_SHOW") -- installs the button hook
+  m.hookedClick.OnClick(m.env.MerchantSellAllJunkButton)
+  check("manual header names vendor wins",
+    m.printed[1] == "|cff66ccffVocVendor|r: junk to sell (0 gray, 0 old gear, 0 expansion, 1 vendor wins):")
+  check("manual lists the row", m.printed[2] == "  " .. mat .. " for 12s 0c")
+  check("manual popup carries vendor wins",
+    #m.popups == 1 and m.popups[1].data.vendorWins ~= nil
+    and #m.popups[1].data.vendorWins == 1)
+  check("blizzard click skipped", m.blizzClicked == false)
+  m.env.StaticPopupDialogs.VOCVENDOR_SELL_JUNK.OnAccept(nil, m.popups[1].data)
+  check("confirm sells vendor wins", #m.sold == 1)
+  -- Vendor wins alone enable the native button.
+  local b = newWorld()
+  local nsb = loadAddon(b)
+  clientLoaded(b)
+  nsb.opts().sellVendorWins = true
+  putBag(b, gear(b, { slot = "", classID = 7, price = 1000, rarity = 1 }))
+  b.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return 100 end,
+  } } }
+  b.junkCount = 0
+  nsb.refreshJunkButton()
+  check("vendor wins alone enable the button", b.buttonEnabled == true)
 end
 
 print("ok - " .. passed .. " checks passed")

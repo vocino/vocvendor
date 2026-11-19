@@ -113,6 +113,7 @@ local defaults = {
   oldGearWarbound = false,-- include Warbound in old gear
   keepDisenchantable = true,
   compareAuction = true,  -- skip vendor sale when auction nets more
+  sellVendorWins = false, -- sell anything the vendor buys above auction net
   sellConsumables = true, -- keep one stack of the strongest per category
   autoSellConsumables = false, -- ...automatically, or behind a confirm list
   useMacros = false, -- keep VV macros pointed at the strongest per quick-use slot
@@ -137,7 +138,7 @@ ns.NEW_TAG_DAYS = 7
 ns.NEW_TAG_WINDOW = 7 * 24 * 60 * 60
 ns.MANUAL_OPT_IN = {
   junkOldGear = true, oldGearBoE = true, oldGearWarbound = true,
-  autoSellConsumables = true, useMacros = true,
+  autoSellConsumables = true, useMacros = true, sellVendorWins = true,
 }
 for _, e in ipairs(ns.EXPANSIONS) do ns.MANUAL_OPT_IN["sell" .. e.key] = true end
 
@@ -537,7 +538,20 @@ function ns.collectJunk()
   end
   -- The checklist is its own consent: no parent toggle gates it.
   local expJunk = ns.collectExpansionJunk()
-  return { grayCount = grayCount, oldGear = oldGear, expJunk = expJunk }
+  -- Vendor wins is the same: its own toggle, sold with the junk. Slots
+  -- already claimed above are excluded so no slot sells twice.
+  local vendorWins = {}
+  if ns.opts().sellVendorWins then
+    local claimed = {}
+    for _, list in ipairs({ oldGear, expJunk }) do
+      for _, it in ipairs(list) do
+        claimed[it.bag .. ":" .. it.slot] = true
+      end
+    end
+    vendorWins = ns.collectVendorWins(claimed)
+  end
+  return { grayCount = grayCount, oldGear = oldGear, expJunk = expJunk,
+    vendorWins = vendorWins }
 end
 
 -- Protected items never sell. Marked on the slash line
@@ -1315,6 +1329,179 @@ function ns.sellOldGearItems(items)
   return n, value, leftover
 end
 
+-- ======= Vendor wins =======
+-- Items the vendor buys above the auction net: with Auctionator,
+-- TradeSkillMaster, or Oribos data saying the auction house nets less
+-- than the vendor price (net of the 5% cut), the vendor is the better
+-- sale. Opt-in only (sellVendorWins): nothing here sells on the junk
+-- definition alone. The ilvl gap does not apply; every keep gate does.
+-- No price data means keep: an unknown auction value never sells.
+function ns.isVendorWins(link, bag, slot, scan, guests)
+  if not link then return false end
+  guests = guests or ns.priceGuests()
+  if not (guests.auctionator or guests.tsm or guests.oribos) then
+    return false
+  end
+  if ns.isProtected(link) then return false end
+  if ns.inEquipmentSet(bag, slot) then return false end
+  if not ns.slotHasValue(bag, slot) then return false end
+  if type(C_Item) ~= "table"
+    or type(C_Item.GetItemInfo) ~= "function" then
+    return false
+  end
+  local r = { pcall(C_Item.GetItemInfo, link) }
+  if not r[1] then return false end
+  -- Past the pcall flag: quality is the 3rd return, the vendor price
+  -- the 11th, class the 12th, bind type the 14th.
+  local quality, sellPrice, classID, bindType = r[4], r[12], r[13], r[15]
+  if not quality then return false end
+  if quality == Enum.ItemQuality.Poor then return false end
+  if quality == Enum.ItemQuality.Heirloom then return false end
+  if not sellPrice or sellPrice == 0 then return false end
+  -- Consumables defer to the consumable sale (winners keep a stack
+  -- there); this sweep never thins them, categorized or not.
+  if type(Enum) == "table" and type(Enum.ItemClass) == "table"
+    and classID == Enum.ItemClass.Consumable then
+    return false
+  end
+  if ns.questKeeps(link) then return false end
+  if ns.isUncollectedCollectible(link, scan and scan.memo) then
+    return false
+  end
+  if ns.isProfessionTool(link) then return false end
+  local o = ns.opts()
+  if bindType == Enum.ItemBind.OnEquip and not o.oldGearBoE then
+    return false
+  end
+  if ns.isWarbound(link) and not o.oldGearWarbound then return false end
+  if ns.pawnSaysUpgrade(link) then return false end
+  if ns.autoGearSaysUpgrade(link, scan) then return false end
+  local auction = ns.getAuctionPrice(link, nil, guests)
+  if not auction then return false end
+  -- Strictly above: ties keep, since this sweep sells items the junk
+  -- definition alone would leave behind.
+  if sellPrice <= ns.auctionNet(auction) then return false end
+  if not o.keepDisenchantable then
+    -- The keep is off: still hold when disenchanting nets more, the
+    -- same guard the old-gear sale applies at the click.
+    if ns.isDisenchantable(link) then
+      local deValue = ns.getDisenchantValue(link, nil, guests)
+      if deValue and ns.auctionNet(deValue) > sellPrice then
+        return false
+      end
+    end
+  else
+    -- The keep is on: disenchantables divert to the disenchant list,
+    -- never to this sale.
+    local canDE = scan and scan.canDE
+    if canDE == nil then canDE = ns.canDisenchant() end
+    if canDE and ns.isDisenchantable(link) then return false end
+  end
+  return true
+end
+
+-- Every vendor-wins bag slot right now, minus already-claimed slots.
+-- One guest resolution and one scan serve the whole sweep.
+function ns.collectVendorWins(exclude)
+  if not ns.opts().sellVendorWins then return {} end
+  local guests = ns.priceGuests()
+  if not (guests.auctionator or guests.tsm or guests.oribos) then
+    return {}
+  end
+  local out = {}
+  local scan = { canDE = ns.canDisenchant(), memo = {}, scores = {} }
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      if not (exclude and exclude[bag .. ":" .. slot]) then
+        local link = C_Container.GetContainerItemLink(bag, slot)
+        if link and ns.isVendorWins(link, bag, slot, scan, guests) then
+          local _, _, _, _, _, _, _, _, _, _, sellPrice =
+            C_Item.GetItemInfo(link)
+          out[#out + 1] = { link = link, bag = bag, slot = slot,
+            price = sellPrice or 0, count = ns.slotCount(bag, slot) }
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- One sale attempt for a vendor-wins candidate: a guard reason, or the
+-- sold count once the click has cleared the slot. The auction verdict
+-- is re-read here: data arriving between the dry-run and the click
+-- holds the item instead of selling it short.
+local function attemptVendorWinsSale(it, guests)
+  if not ns.merchantOpen() then
+    return "vendor closed", 0
+  elseif C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
+    return "moved", 0
+  elseif ns.isProtected(it.link) then
+    return "protected", 0
+  elseif ns.inEquipmentSet(it.bag, it.slot) then
+    return "in equipment set", 0
+  elseif not ns.slotHasValue(it.bag, it.slot) then
+    return "vendor won't buy", 0
+  elseif ns.opts().compareAuction then
+    local auction = ns.getAuctionPrice(it.link, nil, guests)
+    local deValue = ns.isDisenchantable(it.link)
+      and ns.getDisenchantValue(it.link, nil, guests) or nil
+    local verdict = ns.compareItem(it.price, auction, deValue)
+    if verdict == "auction" then
+      return "auction worth more (" .. ns.moneyString(ns.auctionNet(auction)) .. " net)", 0
+    elseif verdict == "disenchant" then
+      return "disenchant worth more (" .. ns.moneyString(ns.auctionNet(deValue)) .. " net)", 0
+    end
+  end
+  local count = ns.slotCount(it.bag, it.slot)
+  local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
+  local still = false
+  if type(C_Container.GetContainerItemLink) == "function" then
+    local okLink, now = pcall(C_Container.GetContainerItemLink, it.bag, it.slot)
+    still = okLink and now == it.link
+  end
+  if ok and not still then return nil, count end
+  return ((not ok) and "sell failed" or "still in bags"), 0
+end
+
+-- Sells a vendor-wins list with the same attempt-everything contract
+-- as the other sales: one refusal never vetoes the visit, click
+-- failures get one second chance, and the caller composes the
+-- announcement. Stacks count fully (price times the slot count).
+function ns.sellVendorWinsItems(items)
+  local n, value = 0, 0
+  local leftover = {}
+  local failed = {}
+  local guests = ns.priceGuests()
+  ns.lastVendorError = nil
+  if type(C_Container) ~= "table" then return n, value, leftover end
+  if type(C_Container.GetContainerItemLink) ~= "function" then
+    return n, value, leftover
+  end
+  items = items or {}
+  for _, it in ipairs(items) do
+    local reason, count = attemptVendorWinsSale(it, guests)
+    if reason == "sell failed" or reason == "still in bags" then
+      failed[#failed + 1] = it
+    elseif reason then
+      leftover[#leftover + 1] = leftoverEntry(it, reason)
+    else
+      n = n + (count or 1)
+      value = value + (it.price or 0) * (count or 1)
+    end
+  end
+  for _, it in ipairs(failed) do
+    local reason, count = attemptVendorWinsSale(it, guests)
+    if reason then
+      leftover[#leftover + 1] = leftoverEntry(it, reason)
+    else
+      n = n + (count or 1)
+      value = value + (it.price or 0) * (count or 1)
+    end
+  end
+  return n, value, leftover
+end
+
 -- The leftover report: a header through the addon voice, then one row
 -- per item with its reason. Always shown: a failed sale is information,
 -- not an announcement.
@@ -1350,8 +1537,11 @@ function ns.mergeByID(items)
       byID[id] = g
       groups[#groups + 1] = g
     end
-    g.qty = g.qty + 1
-    g.total = g.total + (it.price or 0)
+    -- Stacked rows (vendor wins) carry their slot count; single-piece
+    -- gear has none and still counts one.
+    local n = tonumber(it.count) or 1
+    g.qty = g.qty + n
+    g.total = g.total + (it.price or 0) * n
   end
   return groups
 end
@@ -1382,6 +1572,7 @@ function ns.autoSell()
   local kept = ns.collectKeptDisenchantables()
   local dead = ns.collectDeadItems()
   if junk.grayCount == 0 and #junk.oldGear == 0 and #junk.expJunk == 0
+    and #(junk.vendorWins or {}) == 0
     and #kept == 0 and #dead == 0 then
     return
   end
@@ -1396,10 +1587,12 @@ function ns.autoSell()
   local nOld, oldValue, leftover = ns.sellOldGearItems(junk.oldGear)
   local nExp, expValue, leftoverExp = ns.sellOldGearItems(junk.expJunk)
   for _, it in ipairs(leftoverExp) do leftover[#leftover + 1] = it end
+  local nVw, vwValue, leftoverVw = ns.sellVendorWinsItems(junk.vendorWins)
+  for _, it in ipairs(leftoverVw) do leftover[#leftover + 1] = it end
   ns.reportLeftover(leftover)
-  if nGray + nOld + nExp > 0 then
+  if nGray + nOld + nExp + nVw > 0 then
     ns.sellSound()
-    ns.recordSale(nGray + nOld + nExp, earned + oldValue + expValue)
+    ns.recordSale(nGray + nOld + nExp + nVw, earned + oldValue + expValue + vwValue)
   end
 end
 
@@ -1525,12 +1718,13 @@ function ns.refreshJunkButton()
       return
     end
   end
-  if not ns.opts().junkOldGear then
+  if not ns.opts().junkOldGear and not ns.opts().sellVendorWins then
     setEnabled(false)
     return
   end
   local junk = ns.collectJunk()
-  setEnabled(junk.grayCount > 0 or #junk.oldGear > 0 or #junk.expJunk > 0)
+  setEnabled(junk.grayCount > 0 or #junk.oldGear > 0 or #junk.expJunk > 0
+    or #(junk.vendorWins or {}) > 0)
 end
 
 -- Manual path (native button or /vv): same definition as auto-sell, but
@@ -1540,7 +1734,9 @@ function ns.onJunkButtonClick(button)
   local kept = ns.collectKeptDisenchantables()
   local dead = ns.collectDeadItems()
   local junk = ns.collectJunk()
-  if junk.grayCount == 0 and #junk.oldGear == 0 and #junk.expJunk == 0 then
+  junk.vendorWins = junk.vendorWins or {}
+  if junk.grayCount == 0 and #junk.oldGear == 0 and #junk.expJunk == 0
+    and #junk.vendorWins == 0 then
     if #kept > 0 then
       ns.reportKept(kept, true)
     elseif #dead > 0 then
@@ -1550,25 +1746,30 @@ function ns.onJunkButtonClick(button)
     end
     return
   end
-  if #junk.oldGear == 0 and #junk.expJunk == 0 then
+  if #junk.oldGear == 0 and #junk.expJunk == 0 and #junk.vendorWins == 0 then
     if type(ns.blizzJunkClick) == "function" then
       ns.blizzJunkClick(button)
     end
     return
   end
   local sale = {}
-  for _, list in ipairs({ junk.oldGear, junk.expJunk }) do
+  for _, list in ipairs({ junk.oldGear, junk.expJunk, junk.vendorWins }) do
     for _, it in ipairs(list) do sale[#sale + 1] = it end
   end
   local total = 0
-  for _, it in ipairs(sale) do total = total + (it.price or 0) end
-  ns.say("junk to sell (" .. junk.grayCount .. " gray, "
-    .. #junk.oldGear .. " old gear, " .. #junk.expJunk .. " expansion):")
+  for _, it in ipairs(sale) do
+    total = total + (it.price or 0) * (it.count or 1)
+  end
+  local header = "junk to sell (" .. junk.grayCount .. " gray, "
+    .. #junk.oldGear .. " old gear, " .. #junk.expJunk .. " expansion"
+    .. (#junk.vendorWins > 0 and ", " .. #junk.vendorWins .. " vendor wins" or "")
+    .. "):"
+  ns.say(header)
   for _, g in ipairs(ns.mergeByID(sale)) do print(ns.mergedLine(g)) end
   StaticPopup_Show("VOCVENDOR_SELL_JUNK",
     junk.grayCount + #sale, ns.moneyString(total),
     { grayCount = junk.grayCount, oldGear = junk.oldGear,
-      expJunk = junk.expJunk })
+      expJunk = junk.expJunk, vendorWins = junk.vendorWins })
   ns.reportKept(kept, true)
   ns.reportDead(dead, true)
 end
@@ -1586,10 +1787,12 @@ function ns.sellJunkNow(data)
   local nOld, oldValue, leftover = ns.sellOldGearItems(data.oldGear)
   local nExp, expValue, leftoverExp = ns.sellOldGearItems(data.expJunk)
   for _, it in ipairs(leftoverExp) do leftover[#leftover + 1] = it end
+  local nVw, vwValue, leftoverVw = ns.sellVendorWinsItems(data.vendorWins)
+  for _, it in ipairs(leftoverVw) do leftover[#leftover + 1] = it end
   ns.reportLeftover(leftover)
-  if nGray + nOld + nExp > 0 then
+  if nGray + nOld + nExp + nVw > 0 then
     ns.sellSound()
-    ns.recordSale(nGray + nOld + nExp, earned + oldValue + expValue)
+    ns.recordSale(nGray + nOld + nExp + nVw, earned + oldValue + expValue + vwValue)
   end
 end
 
@@ -2959,6 +3162,8 @@ function ns.ensureSettings()
     consumeInit, "sellConsumables")
   check("compareAuction", "Compare auction prices",
     "Skip vendor sale when auction data says the auction house or disenchanting nets more. Needs Auctionator, TradeSkillMaster, or Oribos Exchange.")
+  check("sellVendorWins", "Sell when vendor beats auction",
+    "Sell bag items the vendor buys for more than the auction house nets after the 5% cut, using Auctionator, TradeSkillMaster, or Oribos Exchange data. Items without price data keep; BoE needs Also sell Bind on Equip, Warbound needs Also sell Warbound, and kept disenchantables still divert.")
   check("keepDisenchantable", "Keep disenchantable gear",
     "Enchanters only: keep gear you could disenchant out of junk sales. Off sells it with junk like any other old gear.")
   header("Using",
