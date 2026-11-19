@@ -1,5 +1,7 @@
 # VocVendor
 
+I make these addons for myself. You might find them useful too.
+
 Every vendor visit ends the same way: sell the grays, repair, move on.
 VocVendor does that the moment the window opens, but the selling is
 the small part. Junk is a definition you control, not a fixed pile of
