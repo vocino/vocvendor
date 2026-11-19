@@ -291,373 +291,6 @@ function ns.compareItem(vendor, auction, deValue)
   if auctionNet > vendor then return "auction" end
   return "vendor"
 end
--- ======= Waylaid Crates: cheapest fill =======
--- Forever's Waylaid Crates each take any one listed bundle: "Use: Fill
--- the crate with any bundle from the following list:" plus one "- qty
--- material" line per bundle. The tooltip names the cheapest bundle by
--- the latest pricing-guest data, reusing ns.getAuctionPrice, so the
--- player buys the right materials. Keyed by material name: crate IDs
--- shift between builds while Classic material IDs are stable; a name
--- with no known ID stays unpriced and the line says so. Gated by
--- compareAuction and silent without prices, so the tooltip never shows
--- broken. Retail has no crates, so the hook simply never matches there.
-ns.CRATE_MATERIALS = {
-  -- Apprentice (level 10)
-  ["peacebloom"] = 2447, ["silverleaf"] = 765, ["earthroot"] = 2449,
-  ["mageroyal"] = 785, ["briarthorn"] = 2450,
-  ["copper ore"] = 2770, ["tin ore"] = 2771,
-  ["linen cloth"] = 2589, ["light leather"] = 2318,
-  ["strange dust"] = 10940, ["greater magic essence"] = 10939,
-  ["small glimmering shard"] = 10978, ["large glimmering shard"] = 11084,
-  ["cured light hide"] = 4231, ["bolt of linen cloth"] = 2996,
-  ["copper bar"] = 2840, ["tin bar"] = 3576, ["bronze bar"] = 2841,
-  ["handful of copper bolts"] = 4359, ["copper tube"] = 4361,
-  ["copper modulator"] = 4363,
-  -- Journeyman (level 10)
-  ["stranglekelp"] = 3820, ["bruiseweed"] = 2453,
-  ["wild steelbloom"] = 3355, ["grave moss"] = 3369, ["kingsblood"] = 3356,
-  ["silver ore"] = 2775, ["iron ore"] = 2772,
-  ["wool cloth"] = 2592, ["silk cloth"] = 4306, ["medium leather"] = 2319,
-  ["soul dust"] = 11083, ["greater astral essence"] = 11082,
-  ["small glowing shard"] = 11138, ["large glowing shard"] = 11139,
-  ["bolt of woolen cloth"] = 2997, ["bolt of silk cloth"] = 4305,
-  ["cured medium hide"] = 4233,
-  ["silver bar"] = 2842, ["iron bar"] = 3575,
-  ["bronze tube"] = 4371, ["whirring bronze gizmo"] = 4375,
-  ["bronze framework"] = 4382, ["gold power core"] = 10558,
-  -- Expert (level 20)
-  ["liferoot"] = 3357, ["fadeleaf"] = 3818, ["goldthorn"] = 3821,
-  ["khadgar's whisker"] = 3358,
-  ["wintersbite"] = 3819, ["firebloom"] = 4625, ["purple lotus"] = 8831,
-  ["arthas' tears"] = 8836,
-  ["gold ore"] = 2776, ["mithril ore"] = 3858,
-  ["mageweave cloth"] = 4338, ["heavy leather"] = 4234,
-  ["vision dust"] = 11137, ["greater mystic essence"] = 11135,
-  ["small radiant shard"] = 11177, ["large radiant shard"] = 11178,
-  ["bolt of mageweave"] = 4339, ["cured heavy hide"] = 4236,
-  ["mithril bar"] = 3860, ["steel bar"] = 3859, ["gold bar"] = 3577,
-  ["iron strut"] = 4387, ["mithril tube"] = 10559,
-  ["unstable trigger"] = 10560, ["mithril casing"] = 10561,
-  -- Artisan (level 35)
-  ["golden sansam"] = 13464, ["sungrass"] = 8838, ["blindweed"] = 8839,
-  ["ghost mushroom"] = 8845, ["gromsblood"] = 8846,
-  ["dreamfoil"] = 13463, ["mountain silversage"] = 13465,
-  ["plaguebloom"] = 13466, ["icecap"] = 13467,
-  ["truesilver ore"] = 7911, ["thorium ore"] = 10620,
-  ["dark iron ore"] = 11370,
-  ["runecloth"] = 14047, ["thick leather"] = 4304, ["rugged leather"] = 8170,
-  ["dream dust"] = 11176, ["greater nether essence"] = 11175,
-  ["small brilliant shard"] = 14343, ["large brilliant shard"] = 14344,
-  ["bolt of runecloth"] = 14048, ["cured thick hide"] = 8172,
-  ["dark iron bar"] = 11371, ["truesilver bar"] = 6037,
-  ["thorium bar"] = 12359,
-  ["thorium widget"] = 15994, ["truesilver transformer"] = 18631,
-  ["thorium tube"] = 16000,
-}
--- One bundle line's quantity, display name, and material ID (nil when
--- the name is unknown). Prefers an embedded item link when the client
--- renders one, and falls back to the name table otherwise.
-local function crateBundleFrom(raw)
-  raw = tostring(raw or "")
-  local id = tonumber(raw:match("|Hitem:(%d+)"))
-  local plain = raw:gsub("|H.-|h%[(.-)%]|h", "%1")
-  plain = plain:gsub("|H.-|h(.-)|h", "%1"):gsub("|h", "")
-  plain = plain:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
-  local qty, name = plain:match("^%s*%-?%s*(%d+)%s*(.-)%s*$")
-  if not qty then return nil end
-  name = name:gsub("^[xX]%s+", ""):gsub("^[^%w]+", "")
-  if name == "" then return nil end
-  if not id then id = ns.CRATE_MATERIALS[name:lower()] end
-  return tonumber(qty), name, id
-end
--- One font string can hold several visual rows separated by newlines
--- (the crate's whole bundle list lives inside its Use line), so split
--- each line into segments first, remembering each segment's line and
--- position for the rewrite.
-local function splitTooltipLine(raw)
-  local t = tostring(raw or ""):gsub("\r", "")
-  local parts = {}
-  local start = 1
-  while true do
-    local nl = t:find("\n", start, true)
-    if not nl then
-      parts[#parts + 1] = t:sub(start)
-      break
-    end
-    parts[#parts + 1] = t:sub(start, nl - 1)
-    start = nl + 1
-  end
-  return parts
-end
--- True when a tooltip already carries our winner mark. Blizzard never
--- writes the word, so finding it means re-entry: skip the tooltip.
-local function tooltipMarked(lines)
-  for _, text in ipairs(lines or {}) do
-    if tostring(text or ""):find("Cheapest", 1, true) then return true end
-  end
-  return false
-end
--- Wrap text in a palette color's hex codes for inline tooltip use.
-function ns.colored(color, text)
-  return string.format("|cff%02x%02x%02x%s|r",
-    math.floor(color[1] * 255 + 0.5),
-    math.floor(color[2] * 255 + 0.5),
-    math.floor(color[3] * 255 + 0.5), tostring(text or ""))
-end
--- Tooltip lines to crate bundles, or nil when the tooltip is not a
--- Waylaid Crate. Each bundle keeps its tooltip line number (several
--- bundles can share one line) so the annotation can mark that line.
-function ns.parseCrateBundles(lines)
-  if tooltipMarked(lines) then return nil end
-  if type(lines) ~= "table" then return nil end
-  local segs = {}
-  for i, text in ipairs(lines) do
-    local t = tostring(text or "")
-    local parts = splitTooltipLine(t)
-    for j, piece in ipairs(parts) do
-      segs[#segs + 1] = { text = piece, line = i, seg = j }
-    end
-  end
-  local anchor = nil
-  for i, s in ipairs(segs) do
-    if s.text:lower():find("any bundle", 1, true) then anchor = i break end
-  end
-  if not anchor then return nil end
-  local bundles = {}
-  for i = anchor + 1, #segs do
-    if #bundles >= 10 then break end
-    local qty, name, id = crateBundleFrom(segs[i].text)
-    if qty then
-      bundles[#bundles + 1] = { qty = qty, name = name, id = id,
-        line = segs[i].line, seg = segs[i].seg }
-    elseif #bundles > 0
-      and segs[i].text:gsub("%s", "") ~= "" then
-      break
-    end
-  end
-  if #bundles == 0 then return nil end
-  return bundles
-end
--- Every bundle with its full-bundle cost (unit price times quantity),
--- cost nil when the bundle has no price.
-function ns.crateCosts(bundles, guests)
-  if type(bundles) ~= "table" or #bundles == 0 then return nil end
-  guests = guests or ns.priceGuests()
-  local costs = {}
-  for _, b in ipairs(bundles) do
-    local unit = b.id and ns.getAuctionPrice(nil, b.id, guests) or nil
-    costs[#costs + 1] = { bundle = b,
-      cost = unit and unit * (tonumber(b.qty) or 1) or nil }
-  end
-  return costs
-end
--- Tooltip name and line count, or nil when unreadable.
-function ns.tipSize(tip)
-  if type(tip) ~= "table" then return nil end
-  if type(tip.NumLines) ~= "function" then return nil end
-  local okName, tname = pcall(tip.GetName, tip)
-  if not okName or type(tname) ~= "string" then return nil end
-  local okN, n = pcall(tip.NumLines, tip)
-  if not okN or type(n) ~= "number" then return nil end
-  return tname, n
-end
--- Text lines of one side of a live tooltip, or nil when unreadable.
--- Secret lines (Midnight) error on any string use and taint execution,
--- so a refused read becomes a blank line here, the way refused stats
--- stay unranked; without the API there is nothing to refuse.
-function ns.tooltipLines(tip, side)
-  local tname, n = ns.tipSize(tip)
-  if not tname then return nil end
-  local lines = {}
-  for i = 1, n do
-    local f = _G[tname .. (side or "TextLeft") .. i]
-    local t = f and f.GetText and f:GetText()
-    -- type() is safe on secrets; every comparison after it is not, so
-    -- the access check owns the line before anything else touches it.
-    if type(t) == "string" and canaccessvalue and not canaccessvalue(t) then
-      t = ""
-    end
-    lines[i] = t or ""
-  end
-  return lines
-end
--- Left-side font strings of a live tooltip that can be rewritten,
--- same indices as ns.tooltipLines: entries without a setter stay nil.
-function ns.tooltipFrames(tip)
-  local tname, n = ns.tipSize(tip)
-  if not tname then return nil end
-  local frames = {}
-  for i = 1, n do
-    local f = _G[tname .. "TextLeft" .. i]
-    if f and f.GetText and f.SetText then frames[i] = f end
-  end
-  return frames
-end
--- Mark the cheapest bundle's row with a green Cheapest tag, leaving
--- every line's own text otherwise untouched. SetText is the only font
--- call that provably lands here (color setters silently fail), and the
--- inline code renders through the same path the icon tags use. A crate
--- with no priced bundle gains one muted hint instead, but only when a
--- pricing guest is installed: without one nothing could ever price it,
--- so silence stays silence.
-function ns.annotateCrateTip(tip)
-  if not ns.opts().compareAuction then return end
-  local lines = ns.tooltipLines(tip)
-  if not lines then return end
-  local bundles = ns.parseCrateBundles(lines)
-  if not bundles then return end
-  local costs = ns.crateCosts(bundles)
-  if not costs then return end
-  local best = nil
-  for _, c in ipairs(costs) do
-    if c.cost and (not best or c.cost < best.cost) then best = c end
-  end
-  local frames = ns.tooltipFrames(tip)
-  if best then
-    local fr = frames and frames[best.bundle.line]
-    if fr then
-      local parts = splitTooltipLine(lines[best.bundle.line])
-      local p = parts[best.bundle.seg]
-      if p then
-        parts[best.bundle.seg] = p
-          .. "  " .. ns.colored(COLORS.green, "Cheapest")
-        pcall(fr.SetText, fr, table.concat(parts, "\n"))
-      end
-    end
-  elseif type(tip.AddLine) == "function" then
-    local guests = ns.priceGuests()
-    if not (guests.auctionator or guests.oribos) then return end
-    pcall(tip.AddLine, tip, "No auction prices yet (scan the auction house)",
-      COLORS.muted[1], COLORS.muted[2], COLORS.muted[3])
-  else
-    return
-  end
-  if type(tip.Show) == "function" then pcall(tip.Show, tip) end
-end
--- Per-line readability of one side of a live tooltip for diagnostics.
--- "text" lines are safe to quote; "secret" lines are refused reads
--- (never touched, never printed); anything else is blank or missing.
-function ns.tooltipLineStatus(tip, side)
-  local tname, n = ns.tipSize(tip)
-  if not tname then return nil end
-  local status = {}
-  for i = 1, n do
-    local f = _G[tname .. (side or "TextLeft") .. i]
-    local t = f and f.GetText and f:GetText()
-    if type(t) ~= "string" then
-      status[i] = "missing"
-    elseif canaccessvalue and not canaccessvalue(t) then
-      status[i] = "secret"
-    elseif t:gsub("%s", "") == "" then
-      status[i] = "blank"
-    else
-      status[i] = "text"
-    end
-  end
-  return status
-end
--- Diagnose the hovered crate in chat: hook state, parsed bundles, and
--- each bundle's auction price or why it has none. When the tooltip is
--- not a crate, dump what is actually there (never quoting refused
--- reads) so a silent tooltip explains itself. Facts for a bug report
--- instead of memory, like /vv diag and /vv why.
-function ns.diagCrate()
-  ns.say("crate hook " .. (ns.crateHooked and "on" or "off")
-    .. ", auction compare "
-    .. (ns.opts().compareAuction and "on" or "off"))
-  if not ns.crateHooked and ns.crateHookError then
-    print("  hook error: " .. tostring(ns.crateHookError))
-  end
-  local lines = nil
-  if type(GameTooltip) == "table" then lines = ns.tooltipLines(GameTooltip) end
-  if not lines then
-    ns.say("no game tooltip to read")
-    return
-  end
-  local bundles = ns.parseCrateBundles(lines)
-  if not bundles then
-    if tooltipMarked(lines) then
-      ns.say("cheapest already marked on this tooltip")
-      return
-    end
-    ns.say("hover a Waylaid Crate first")
-    local gt = GameTooltip
-    local shownOk, shown = pcall(gt.IsShown, gt)
-    print("  tooltip shown: "
-      .. ((shownOk and shown) and "yes" or (shownOk and "no" or "unknown")))
-    local ownerOk, owner = pcall(gt.GetOwner, gt)
-    local ownerName = "unknown"
-    if ownerOk and type(owner) == "table"
-      and type(owner.GetName) == "function" then
-      local okN, nm = pcall(owner.GetName, owner)
-      if okN and type(nm) == "string" and nm ~= "" then ownerName = nm end
-    end
-    print("  tooltip owner: " .. ownerName)
-    local left = lines
-    local right = ns.tooltipLines(gt, "TextRight")
-    local statusL = ns.tooltipLineStatus(gt, "TextLeft")
-    local statusR = ns.tooltipLineStatus(gt, "TextRight")
-    if statusL then
-      for i = 1, math.min(#statusL, 12) do
-        local function show(which, st, src)
-          if st == "text" then
-            return "\"" .. tostring((src or {})[i] or ""):sub(1, 120) .. "\""
-          end
-          return "(" .. tostring(st) .. ")"
-        end
-        local r = statusR and statusR[i] or "missing"
-        print("  line " .. i .. ": L=" .. show("L", statusL[i], left)
-          .. " R=" .. show("R", r, right))
-      end
-    end
-    return
-  end
-  local guests = ns.priceGuests()
-  for _, b in ipairs(bundles) do
-    local unit = b.id and ns.getAuctionPrice(nil, b.id, guests) or nil
-    local what = "  " .. tostring(b.qty) .. "x " .. b.name
-    if unit then
-      print(what .. " (" .. ns.moneyString(unit * b.qty) .. ")")
-    elseif not b.id then
-      print(what .. " (unknown material)")
-    else
-      print(what .. " (no auction data)")
-    end
-  end
-end
--- One hook covers every item tooltip (bags, links, merchants); the
--- anchor text matches only crate tooltips. The data-processor post-call
--- runs once the item lines are final; a Show hook can run on lines the
--- data handler has not applied yet (and OnTooltipSetItem cannot be
--- hooked on this client at all). Older clients without the processor
--- keep the Show hook, where SetX fills lines synchronously.
--- Presence-gated and hooked once, like the macro hook.
-function ns.hookCrateTooltip()
-  if ns.crateHooked then return end
-  if type(GameTooltip) ~= "table" then return end
-  if type(TooltipDataProcessor) == "table"
-    and type(TooltipDataProcessor.AddTooltipPostCall) == "function"
-    and type(Enum) == "table" and type(Enum.TooltipDataType) == "table"
-    and Enum.TooltipDataType.Item ~= nil then
-    local ok, err = pcall(TooltipDataProcessor.AddTooltipPostCall,
-      Enum.TooltipDataType.Item,
-      function(tip) ns.annotateCrateTip(tip) end)
-    if ok then
-      ns.crateHooked = true
-    else
-      ns.crateHookError = tostring(err)
-    end
-    return
-  end
-  if type(GameTooltip.HookScript) ~= "function" then return end
-  local ok, err = pcall(GameTooltip.HookScript, GameTooltip, "OnShow",
-    function(self) ns.annotateCrateTip(self) end)
-  if ok then
-    ns.crateHooked = true
-  else
-    ns.crateHookError = tostring(err)
-  end
-end
 -- Losing consumables: one stack of the strongest per buff slot, the rest
 -- vendors. A category is a buff slot (food, flask, battle elixir, ...):
 -- two consumables in it never stack, so the strongest wins and every
@@ -775,9 +408,15 @@ function ns.consumableCategory(link, memo)
   if sub == SC.Itemenhancement or sub == SC.ItemenhancementTemporary then
     local desc = ns.consumableDesc(link, memo)
     if not desc or ns.isSpecialConsumable(desc) then return nil end
-    if hasAny(desc, ns.OFFENSE_WORDS) or hasAny(desc, ns.DEFENSE_WORDS) then
-      return "weapon"
-    end
+    -- Weapon oils coat a weapon, armor kits reinforce armor: different
+    -- equip targets that stack, so offense keeps its own winner under
+    -- "weapon" and defense keeps its own under "armor". A mixed
+    -- enhancement proves nothing over either side, so it keeps like a
+    -- mixed elixir does.
+    local off = hasAny(desc, ns.OFFENSE_WORDS)
+    local def = hasAny(desc, ns.DEFENSE_WORDS)
+    if off and not def then return "weapon" end
+    if def and not off then return "armor" end
     return nil
   end
   if sub == SC.Draught or sub == SC.VantusRune then
@@ -3436,7 +3075,6 @@ ns.HELP = {
   "/vv protect       keep an item out of every sale",
   "/vv diag          show consumable ranks",
   "/vv why           explain each gear verdict",
-  "/vv crate         explain the hovered crate's cheapest fill",
   "/vv dismiss-new   clear all New tags",
   "/vv config        open Settings > AddOns > VocVendor",
   "/vv help          this list (/vocvendor works too)",
@@ -3510,8 +3148,6 @@ SlashCmdList.VOCVENDOR = function(msg)
     ns.diagConsumables()
   elseif msg == "why" then
     ns.diagOldGear()
-  elseif msg == "crate" then
-    ns.diagCrate()
   elseif msg == "dismiss-new" then
     ns.dismissNew()
   elseif msg == "config" then
@@ -3546,7 +3182,6 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1, arg2)
     ns.ensureSettings()
     ns.checkRivals() -- a same-job addon loaded before us stands us down
     ns.hookMacroFrame() -- the macro window may already be up
-    ns.hookCrateTooltip() -- Waylaid Crate tooltips gain the cheapest fill
   elseif event == "ADDON_LOADED" then
     ns.checkRivals() -- a same-job addon loaded after us does the same
     ns.hookMacroFrame() -- Blizzard_MacroUI loads on demand
@@ -3554,7 +3189,6 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1, arg2)
     ns.ensureSettings() -- in case Settings wasn't up at ADDON_LOADED
     ns.checkRivals()
     ns.hookMacroFrame()
-    ns.hookCrateTooltip()
     ns.updateUseMacros() -- bags are settled: point macros at winners
   elseif event == "MERCHANT_SHOW" then
     ns.onMerchantShow()

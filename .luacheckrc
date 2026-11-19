@@ -55,7 +55,6 @@ read_globals = {
   "Enum", -- ItemClass/ItemBind/ItemQuality values identical on both clients
   "PlaySound", "SOUNDKIT", -- presence-gated; ns.play falls back to numeric IDs
   "GameTooltip",
-  "TooltipDataProcessor", -- item post-call for crate costs (live + forever)
   "hooksecurefunc", "strtrim",
   -- Optional guests: Pawn upgrades never sell; Auctionator/TSM/Oribos feed auction math
   "PawnGetItemData", "PawnIsItemAnUpgrade",
