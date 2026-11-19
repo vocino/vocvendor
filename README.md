@@ -1,10 +1,13 @@
 # VocVendor
 
 Every vendor visit ends the same way: sell the grays, repair, move on.
-VocVendor does both the moment the window opens. Junk is a definition
-you control, not a fixed pile of grays: opt old gear in and it sells
-with the junk, automatically and on the game's own Sell Junk button.
-Everything else it leaves alone.
+VocVendor does that the moment the window opens, but the selling is
+the small part. Junk is a definition you control, not a fixed pile of
+grays, and everything that is not junk gets a verdict instead of a
+sale. Worth more at auction: held back, with its reason. Worth more
+as shards: sent to the disenchant list. Heirloom, set piece,
+uncollected appearance: protected, always. What is left sells, the
+repair runs on the proceeds, and one chat line reports the take.
 
 ## Install
 
