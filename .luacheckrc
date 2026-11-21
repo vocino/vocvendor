@@ -55,6 +55,7 @@ read_globals = {
   "Enum", -- ItemClass/ItemBind/ItemQuality values identical on both clients
   "PlaySound", "SOUNDKIT", -- presence-gated; ns.play falls back to numeric IDs
   "GameTooltip",
+  "ChatFrameUtil", -- shift-click funnel (HandleModifiedItemClick -> InsertLink, live + forever UI source); hook-only, presence-gated
   "hooksecurefunc", "strtrim",
   -- Optional guests: Pawn upgrades never sell; Auctionator/TSM/Oribos feed auction math
   "PawnGetItemData", "PawnIsItemAnUpgrade",

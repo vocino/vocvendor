@@ -40,7 +40,7 @@ while kept gear waits.
 /vv destroy       delete dead expansion items (confirms each)
 /vv consume       sell losing consumables
 /vv use           use best consumables (refresh macros)
-/vv protect       keep an item out of every sale
+/vv protect       open the keeps list (names, shift-click, commas ok)
 /vv diag          show consumable ranks
 /vv why           explain each gear verdict
 /vv dismiss-new   clear all New tags
@@ -78,7 +78,7 @@ a new sale category stays off until you check it.
 ## How it works
 
 Grays go through Blizzard's own junk sale, the same call the Sell
-Junk button makes. Old gear is weapons and armor at least the
+Junk button makes (kept grays sit out while the rest sell one by one). Old gear is weapons and armor at least the
 configured gap below everything you wear in that slot (when AutoGear
 scores both items, anything it scores strictly lower sells instead), never
 heirlooms, never profession tools (fishing poles, skinning knives,
@@ -99,7 +99,7 @@ disenchant list first for enchanters. Each
 candidate is re-checked by bag slot right before it sells, so a bag
 that shifted between the dry run and the click never sells the wrong
 item. When Auctionator, TradeSkillMaster, or Oribos Exchange is installed, old gear worth more on the auction house (sold directly, or disenchanted first, net of the 5% auction cut) is held back with its reason instead of sold. With Sell when vendor beats auction checked, the reverse also sells: bag items the vendor buys for more than the auction house nets go with the junk, whatever their age, with the same keep gates holding (equipment sets, transmog and toys and pets, live quest items, heirlooms, profession tools, consumables, kept disenchantables, and BoE and Warbound unless opted in). A sale that fails stops the run and lists what is left with the
-reason, instead of retrying. Consumables compete one stack per buff slot: food, drink, flask, battle and guardian elixirs, healing and mana and resource and protection potions, bandages, scrolls, weapon consumables, and utility. A Well Fed experience buff always wins its food slot first; otherwise the strongest number wins (item level, then your own primary stat, break ties), one full stack of it stays, and every loser sells, including any of the winner past that stack. Unrecognized items, one-of-a-kind effects (invisibility, water breathing, transforms, summons), quest items, and anything marked with `/vv protect` never sell. With Maintain use macros on, the VV Food, VV Drink, VV Health, VV Mana and VV Bandage macros point at those same winners and update when bags change; `/vv use` prints the picks. The vendor visit shows a confirm list with Sell All and Cancel unless auto-sell is on, and a sale stopped by a failed click lists what is left with the reason. `/vv diag` prints each buff slot's winner with its numbers for bug reports, and a sale the client itself blocks is announced by name instead of failing silently.
+reason, instead of retrying. Consumables compete one stack per buff slot: food, drink, flask, battle and guardian elixirs, healing and mana and resource and protection potions, bandages, scrolls, weapon consumables, and utility. A Well Fed experience buff always wins its food slot first; otherwise the strongest number wins (item level, then your own primary stat, break ties), one full stack of it stays, and every loser sells, including any of the winner past that stack. Unrecognized items, one-of-a-kind effects (invisibility, water breathing, transforms, summons), quest items, and anything kept with `/vv protect` (name, shift-click, or itemID; commas ok) never sells — grays, old gear, expansion items, and delete-list leftovers included. With Maintain use macros on, the VV Food, VV Drink, VV Health, VV Mana and VV Bandage macros point at those same winners and update when bags change; `/vv use` prints the picks. The vendor visit shows a confirm list with Sell All and Cancel unless auto-sell is on, and a sale stopped by a failed click lists what is left with the reason. `/vv diag` prints each buff slot's winner with its numbers for bug reports, and a sale the client itself blocks is announced by name instead of failing silently.
 When another junk-selling addon is loaded,
 VocVendor warns once and pauses its own auto-sell; `/vv on` turns it
 back on.

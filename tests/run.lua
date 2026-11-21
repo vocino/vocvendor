@@ -211,7 +211,14 @@ local function loadAddon(world)
     SetScript = function(_, n, fn) world.hookedClick[n] = fn end,
     SetEnabled = function(_, e) world.buttonEnabled = e end,
   }
-  g.hooksecurefunc = function(n, fn) world.hooks[n] = fn end
+  g.hooksecurefunc = function(n, fn, h)
+    if type(n) == "table" and type(fn) == "string" then
+      world.hooks[n] = world.hooks[n] or {}
+      world.hooks[n][fn] = h
+    else
+      world.hooks[n] = fn
+    end
+  end
   -- Blizzard's own refresh; the search post-hooks it (nil it to test
   -- the missing-update gate).
   g.MerchantFrame_Update = function() end
@@ -2514,10 +2521,275 @@ do
   check("protected loser leaves the sale",
     #ns.collectConsumableSale() == 0)
   w.env.SlashCmdList.VOCVENDOR("protect")
-  check("protect lists", w.printed[#w.printed] == "  " .. weak)
+  check("protect opens the keeps window",
+    ns.keepWindow ~= nil and ns.keepWindow:IsShown()
+    and #ns.keepRows == 1 and ns.keepRows[1].text.text == weak)
   w.env.SlashCmdList.VOCVENDOR("protect bogus")
   check("protect rejects garbage",
-    w.printed[#w.printed] == "|cff66ccffVocVendor|r: couldn't find that item (shift-click it or give its itemID)")
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: couldn't find bogus (shift-click it, or give its name or itemID)")
+end
+
+-- 78b. Slash: /vv protect takes a comma-separated list (AutoGear-style);
+-- a list only ever keeps, so repeats report instead of exposing.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local a = gear(w, {})
+  local b = gear(w, {})
+  w.playedSounds = {}
+  ns.toggleProtect(a .. ", " .. b)
+  check("list protects both", ns.isProtected(a) and ns.isProtected(b))
+  check("list announces first",
+    w.printed[#w.printed - 1] == "|cff66ccffVocVendor|r: protected: " .. a)
+  check("list announces second",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: protected: " .. b)
+  check("list confirms once", #w.playedSounds == 1 and w.playedSounds[1] == 856)
+  local n = #w.printed
+  w.playedSounds = {}
+  ns.toggleProtect(a .. "," .. b)
+  check("repeat keeps both", ns.isProtected(a) and ns.isProtected(b))
+  check("repeat reports instead of exposing",
+    w.printed[#w.printed - 1] == "|cff66ccffVocVendor|r: already protected: " .. a
+    and w.printed[#w.printed] == "|cff66ccffVocVendor|r: already protected: " .. b)
+  check("repeat stays silent", #w.playedSounds == 0 and #w.printed == n + 2)
+  ns.toggleProtect(a)
+  check("single still unkeeps one", not ns.isProtected(a) and ns.isProtected(b))
+  -- Numeric IDs split the same way.
+  local c = gear(w, {})
+  local d = gear(w, {})
+  ns.toggleProtect(w.itemIDs[c] .. "," .. w.itemIDs[d])
+  check("numeric list protects", ns.isProtected(c) and ns.isProtected(d))
+  -- A comma inside a display name never splits the link.
+  local full = "|cffffffff|Hitem:424242:0:0:0|h[Foo, Bar]|h|r"
+  w.itemIDs[full] = 424242
+  local e = gear(w, {})
+  ns.toggleProtect(full .. ", " .. e)
+  check("link comma stays intact", ns.isProtected(full) and ns.isProtected(e))
+  -- One bad entry reports without blocking the good one.
+  local f = gear(w, {})
+  local m = #w.printed
+  w.playedSounds = {}
+  ns.toggleProtect(f .. ", bogus")
+  check("mixed list keeps the good one", ns.isProtected(f))
+  check("mixed list names the bad one",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: couldn't find bogus (shift-click it, or give its name or itemID)")
+  check("mixed list still confirms", #w.playedSounds == 1 and m < #w.printed)
+end
+
+-- 78c. Keeps window: /vv protect opens it, the box keeps typed or
+-- shift-clicked links, a row click unkeeps, and chat lists when the
+-- window cannot open.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  local a = gear(w, {})
+  local b = gear(w, {})
+  ns.openKeeps()
+  check("empty keeps opens", ns.keepWindow ~= nil and ns.keepWindow:IsShown())
+  check("empty keeps announces nothing", #w.printed == 0)
+  ns.keepBox:SetText(a .. ", " .. b)
+  ns.keepBox.scripts.OnEnterPressed(ns.keepBox)
+  check("box keeps the list", ns.isProtected(a) and ns.isProtected(b))
+  check("box clears", ns.keepBox:GetText() == "")
+  check("box lists rows", #ns.keepRows == 2
+    and ns.keepRows[1].text.text ~= nil and ns.keepRows[2].text.text ~= nil)
+  check("rows read the set", ns.keepRows[1].keepID ~= nil
+    and ns.keepRows[2].keepID ~= nil
+    and ns.isProtected(a) and ns.isProtected(b))
+  local first, second = ns.keepRows[1], ns.keepRows[2]
+  local firstShown, secondShown = first.keepShown, second.keepShown
+  first.scripts.OnClick(first)
+  check("row click unkeeps",
+    not ns.isProtected(firstShown) and ns.isProtected(secondShown))
+  check("row click announces",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: no longer protected: " .. firstShown)
+  check("row click confirms off", w.playedSounds[#w.playedSounds] == 857)
+  ns.keepRows[2].scripts.OnClick(ns.keepRows[2])
+  check("last row empties the set", not ns.isProtected(secondShown))
+  check("unkeep unknown stays silent", (function()
+    local n = #w.printed
+    ns.unkeep(424242, "item:424242")
+    return #w.printed == n
+  end)())
+  -- Window-less clients fall back to the chat list.
+  local v = newWorld()
+  local nsv = loadAddon(v)
+  clientLoaded(v)
+  local g = gear(v, {})
+  nsv.toggleProtect(g)
+  v.printed = {}
+  v.env.CreateFrame = nil
+  nsv.keepWindow = nil
+  v.env.SlashCmdList.VOCVENDOR("protect")
+  check("fallback lists", v.printed[#v.printed] == "  " .. g)
+end
+
+-- 78d. Shift-click reception: the keeps box hooks Blizzard's own
+-- link funnel and keeps the link only while focused and shown.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  w.env.ChatFrameUtil = { InsertLink = function() return false end }
+  clientLoaded(w)
+  ns.openKeeps()
+  local hooked = w.hooks[w.env.ChatFrameUtil]
+    and w.hooks[w.env.ChatFrameUtil].InsertLink
+  check("link funnel hooked", type(hooked) == "function")
+  local a = gear(w, {})
+  local n = #w.printed
+  hooked(a) -- box not focused: passes through untouched
+  check("unfocused shift-click ignored",
+    not ns.isProtected(a) and #w.printed == n)
+  ns.keepBox.scripts.OnEditFocusGained(ns.keepBox)
+  hooked(a)
+  check("focused shift-click keeps", ns.isProtected(a))
+  check("focused shift-click lists", #ns.keepRows == 1
+    and ns.keepRows[1].text.text == a)
+  local m = #w.printed
+  hooked("spell:1126") -- not an item: ignored, never announced
+  check("non-item shift-click ignored", #w.printed == m)
+  ns.keepBox.scripts.OnEditFocusLost(ns.keepBox)
+  local b = gear(w, {})
+  hooked(b)
+  check("defocused shift-click ignored", not ns.isProtected(b))
+  ns.keepWindow:Hide()
+  ns.keepBox.scripts.OnEditFocusGained(ns.keepBox)
+  hooked(b)
+  check("hidden window ignores shift-click", not ns.isProtected(b))
+  -- Without the funnel the hook never installs, typed entry works.
+  local u = newWorld()
+  local nsu = loadAddon(u)
+  clientLoaded(u)
+  nsu.openKeeps()
+  local found = false
+  for _, fns in pairs(u.hooks) do
+    if type(fns) == "table" and fns.InsertLink then found = true end
+  end
+  check("no funnel means no hook", found == false)
+  local c = gear(u, {})
+  nsu.keepBox:SetText(c)
+  nsu.keepBox.scripts.OnEnterPressed(nsu.keepBox)
+  check("typed entry works unhooked", nsu.isProtected(c))
+end
+
+-- 78e. Keeps hold on every path: bare names keep, and protection
+-- covers old gear, expansion junk, dead items, late protects, and
+-- grays (which skip Blizzard's bulk sale while any is kept).
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  -- Bare names keep what's in the bags (case-insensitive).
+  w.itemIDs["Sword of Dawn"] = 777001
+  w.bags[0] = { "Sword of Dawn" }
+  ns.toggleProtect("sword of dawn")
+  check("name keeps by ID", ns.isProtected("Sword of Dawn"))
+  check("name announces the link",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: protected: Sword of Dawn")
+  local n = #w.printed
+  ns.toggleProtect("Sword of Dawn")
+  check("naming a kept item reports",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: already protected: Sword of Dawn"
+    and #w.printed == n + 1)
+  ns.toggleProtect("no such blade")
+  check("unknown name errors",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: couldn't find no such blade (shift-click it, or give its name or itemID)")
+  -- Old gear: protected pieces never collect, and a late protect
+  -- holds at the click.
+  ns.opts().junkOldGear = true
+  w.equipped[1] = gear(w, { slot = "INVTYPE_HEAD", level = 400 })
+  local old = gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 })
+  putBag(w, old)
+  local found = false
+  for _, it in ipairs(ns.collectOldGear()) do
+    if it.link == old then found = true end
+  end
+  check("old gear collects unprotected", found == true)
+  local why = {}
+  ns.toggleProtect(old)
+  check("old gear explains the keep",
+    ns.isOldGear(old, 30, nil, nil, why) == false
+    and why.reason == "kept (/vv protect)")
+  check("old gear excludes the kept", #ns.collectOldGear() == 0)
+  local sb, ss = putBag(w, gear(w, { slot = "INVTYPE_HEAD", level = 300, price = 1000 }))
+  local late = w.bags[0][ss]
+  local items = ns.collectOldGear()
+  check("late candidate collects", #items == 1)
+  ns.toggleProtect(late)
+  local ln, _, left = ns.sellOldGearItems(items)
+  check("late protect holds at the click",
+    ln == 0 and #left == 1 and left[1].reason == "protected")
+  check("late protect leaves the item",
+    w.removed[sb .. ":" .. ss] ~= true)
+  -- Expansion junk and dead items honor the keep too.
+  ns.opts().sellTww = true
+  local exp = gear(w, { slot = "", classID = 7, expansion = 10, price = 500, rarity = 1 })
+  putBag(w, exp)
+  check("expansion junk collects unprotected",
+    ns.isExpansionJunk(exp, 0, #w.bags[0]) == true)
+  ns.toggleProtect(exp)
+  check("expansion junk excludes the kept",
+    ns.isExpansionJunk(exp, 0, #w.bags[0]) == false)
+  ns.opts().sellLegion = true
+  local ap = gear(w, { classID = 0, expansion = 6, price = 0 })
+  w.artifactPower[ap] = true
+  local ab, as = putBag(w, ap)
+  check("dead item collects unprotected",
+    ns.deadReason(ap, ab, as) == "artifact power")
+  ns.toggleProtect(ap)
+  check("dead item excludes the kept", ns.deadReason(ap, ab, as) == nil)
+  local dead = false
+  for _, it in ipairs(ns.collectDeadItems()) do
+    if it.link == ap then dead = true end
+  end
+  check("dead list excludes the kept", dead == false)
+  -- Grays: bulk while nothing is kept, per-item clicks while any is.
+  local g = newWorld()
+  local nsg = loadAddon(g)
+  clientLoaded(g)
+  g.junkCount = 2
+  g.junkValue = 300
+  local g1 = gear(g, { slot = "", classID = 7, rarity = 0, price = 100 })
+  local g2 = gear(g, { slot = "", classID = 7, rarity = 0, price = 200 })
+  putBag(g, g1)
+  putBag(g, g2)
+  local earned, sold = nsg.sellGrays()
+  check("bulk sells unkept grays", g.junkSold == true and earned == 300 and sold == 2)
+  local h = newWorld()
+  local nsh = loadAddon(h)
+  clientLoaded(h)
+  h.junkCount = 2
+  local h1 = gear(h, { slot = "", classID = 7, rarity = 0, price = 100 })
+  local h2 = gear(h, { slot = "", classID = 7, rarity = 0, price = 200 })
+  local hb1, hs1 = putBag(h, h1)
+  putBag(h, h2)
+  nsh.toggleProtect(h1)
+  local hearned, hsold = nsh.sellGrays()
+  check("kept gray survives", h.removed[hb1 .. ":" .. hs1] ~= true)
+  check("other grays still sell", hsold == 1 and h.junkSold == false)
+  check("bulk never runs with keeps", hearned == 0)
+  -- Nothing sellable left: the button explains instead of clicking.
+  local k = newWorld()
+  local nsk = loadAddon(k)
+  clientLoaded(k)
+  k.junkCount = 2
+  local k1 = gear(k, { slot = "", classID = 7, rarity = 0, price = 100 })
+  local k2 = gear(k, { slot = "", classID = 7, rarity = 0, price = 200 })
+  local kb1, ks1 = putBag(k, k1)
+  local kb2, ks2 = putBag(k, k2)
+  nsk.toggleProtect(k1)
+  nsk.toggleProtect(k2)
+  local kearned, ksold = nsk.sellGrays()
+  check("all-kept grays sell nothing", ksold == 0 and kearned == 0)
+  check("all-kept grays survive",
+    k.removed[kb1 .. ":" .. ks1] ~= true
+    and k.removed[kb2 .. ":" .. ks2] ~= true)
+  k.frame.onEvent(nil, "MERCHANT_SHOW")
+  k.env.SlashCmdList.VOCVENDOR("")
+  check("all-kept grays explain", k.printed[#k.printed] == "|cff66ccffVocVendor|r: kept 2 gray")
+  check("all-kept grays skip the bulk click", k.blizzClicked == false)
 end
 
 -- 79. Never-sell guards hold end to end: quest, unrecognized, special,

@@ -574,11 +574,17 @@ function ns.collectJunk()
     vendorWins = vendorWins }
 end
 
--- Protected items never sell. Marked on the slash line
--- (/vv protect): the SavedVariables set holds item IDs, and the stored
--- link (when marked by link) names them back in /vv protect with no
--- argument. Not a registered setting: free text lives on the slash
--- line (FAMILY.md "Settings").
+-- Protected items never sell, on any path: grays (which Blizzard's
+-- own bulk sale would otherwise take), old gear, expansion items,
+-- vendor wins, consumables, and the delete list all check the keep
+-- first, and each click re-checks it. Kept in the keeps window (/vv
+-- protect) or on its slash line: the SavedVariables set holds item
+-- IDs, and the stored link (when marked by link) names it back in
+-- both. Links and numeric IDs resolve directly; a bare name keeps
+-- every matching bag stack, so typing the name works like
+-- shift-clicking it. One direct slash item toggles; names and
+-- comma-separated lists only ever keep, so bulk-keeping can never
+-- bulk-expose (unkeep one row or one item at a time).
 function ns.isProtected(link)
   local id = ns.itemID(link)
   return id ~= nil and type(ns.db) == "table"
@@ -586,37 +592,392 @@ function ns.isProtected(link)
     and ns.db.protectedItems[id] ~= nil
 end
 
+-- Split a protect input on commas, keeping full item links intact:
+-- a display name may itself contain a comma, so commas inside a link
+-- (|c...|Hitem...|h[name]|h|r) never split. Bare links ("item:...") and
+-- numeric IDs have no commas or spaces and split normally.
+---@param text string
+local function splitProtectInput(text)
+  local tokens = {}
+  local pos = 1
+  while pos <= #text do
+    local s, e = text:find("|c.-|Hitem.-|h.-|h|r", pos)
+    if not s then s, e = text:find("|Hitem.-|h.-|h", pos) end
+    if not s then break end
+    local before = text:sub(pos, s - 1)
+    for piece in (before .. ","):gmatch("(.-),") do
+      piece = strtrim(piece)
+      if piece ~= "" then tokens[#tokens + 1] = piece end
+    end
+    tokens[#tokens + 1] = strtrim(text:sub(s, e))
+    pos = e + 1
+  end
+  for piece in (text:sub(pos) .. ","):gmatch("(.-),") do
+    piece = strtrim(piece)
+    if piece ~= "" then tokens[#tokens + 1] = piece end
+  end
+  return tokens
+end
+
+-- Keep-token resolution: a link or numeric ID resolves directly; a
+-- bare name keeps every matching bag stack by ID (case-insensitive
+-- exact match on the client's own item name), so typing the name of
+-- what's in the bags works like shift-clicking it. Names only match
+-- what the bags hold right now, so a typo still errors instead of
+-- silently keeping nothing. Returns a list of { id, shown } plus
+-- whether the token was the direct (link-or-ID) form.
+local function resolveKeepToken(tok)
+  local found, seen = {}, {}
+  local function add(id, shown, linked)
+    if id ~= nil and not seen[id] then
+      seen[id] = true
+      found[#found + 1] = { id = id, shown = shown, linked = linked }
+    end
+  end
+  if tok:find("item:", 1, true) then
+    local id = ns.itemID(tok)
+    if id then add(id, tok, true) end
+    return found, true
+  end
+  local num = tonumber(tok)
+  if num then
+    add(num, "item:" .. num, false)
+    return found, true
+  end
+  local want = strtrim(tok):lower()
+  if want ~= "" and type(C_Container) == "table"
+    and type(C_Container.GetContainerNumSlots) == "function"
+    and type(C_Container.GetContainerItemLink) == "function"
+    and type(C_Item) == "table"
+    and type(C_Item.GetItemInfo) == "function" then
+    for bag = 0, NUM_BAG_SLOTS do
+      local slots = C_Container.GetContainerNumSlots(bag)
+      for slot = 1, slots do
+        local link = C_Container.GetContainerItemLink(bag, slot)
+        if link then
+          local ok, name = pcall(C_Item.GetItemInfo, link)
+          if ok and type(name) == "string" and name:lower() == want then
+            local id = ns.itemID(link)
+            if id then add(id, link, true) end
+          end
+        end
+      end
+    end
+  end
+  return found, false
+end
+
+local function keepFailure(tok)
+  return "couldn't find " .. tok .. " (shift-click it, or give its name or itemID)"
+end
+
 ---@param text string
 function ns.toggleProtect(text)
   text = strtrim(text or "")
-  local id = nil
-  if text:find("item:", 1, true) then id = ns.itemID(text) end
-  if not id then id = tonumber(text) end
-  if not id then
-    ns.say("couldn't find that item (shift-click it or give its itemID)")
+  if text == "" then
+    ns.say("couldn't find that item (shift-click it, or give its name or itemID)")
     return
   end
   if type(ns.db.protectedItems) ~= "table" then ns.db.protectedItems = {} end
-  local shown = text:find("item:", 1, true) and text or ("item:" .. id)
-  if ns.db.protectedItems[id] then
-    ns.db.protectedItems[id] = nil
-    ns.play("off")
-    ns.say("no longer protected: " .. shown)
-  else
-    ns.db.protectedItems[id] = text:find("item:", 1, true) and text or true
-    ns.play("on")
-    ns.say("protected: " .. shown)
+  local tokens = splitProtectInput(text)
+  -- One direct item keeps the exact toggle: repeat to stop keeping
+  -- it. A bare name only ever keeps what it names, so naming a kept
+  -- item reports instead of toggling it off.
+  if #tokens <= 1 then
+    local one = tokens[1] or text
+    local resolved, direct = resolveKeepToken(one)
+    if #resolved == 0 then
+      ns.say(keepFailure(one))
+      return
+    end
+    if direct and #resolved == 1 then
+      local id, shown = resolved[1].id, resolved[1].shown
+      if ns.db.protectedItems[id] then
+        ns.db.protectedItems[id] = nil
+        ns.play("off")
+        ns.say("no longer protected: " .. shown)
+      else
+        ns.db.protectedItems[id] = one:find("item:", 1, true) and one or true
+        ns.play("on")
+        ns.say("protected: " .. shown)
+      end
+      return
+    end
+    ns.keepMatches(resolved)
+    return
   end
+  -- A comma-separated list only ever keeps: bulk unprotecting by
+  -- accident could sell something the player meant to keep, so repeats
+  -- report instead of toggling off (unkeep one item at a time).
+  ns.keepText(text)
+end
+
+-- Keeps every resolved match, reporting repeats instead of toggling
+-- them off. Shared by named singles and comma-separated lists.
+function ns.keepMatches(resolved)
+  if type(ns.db.protectedItems) ~= "table" then ns.db.protectedItems = {} end
+  local added = false
+  for _, m in ipairs(resolved or {}) do
+    if ns.db.protectedItems[m.id] then
+      ns.say("already protected: " .. m.shown)
+    else
+      ns.db.protectedItems[m.id] = m.linked and m.shown or true
+      ns.say("protected: " .. m.shown)
+      added = true
+    end
+  end
+  if added then ns.play("on") end
+end
+
+-- Add-only keep for text from the slash line or the keeps box: every
+-- resolvable entry is kept, repeats report instead of toggling off,
+-- and failures name their entry without blocking the rest. Lines read
+-- in typed order, with one confirmation sound for the whole list.
+function ns.keepText(text)
+  if type(ns.db.protectedItems) ~= "table" then ns.db.protectedItems = {} end
+  local added, seen = false, {}
+  for _, tok in ipairs(splitProtectInput(strtrim(text or ""))) do
+    local matches = resolveKeepToken(tok)
+    if #matches == 0 then
+      ns.say(keepFailure(tok))
+    end
+    for _, m in ipairs(matches) do
+      if not seen[m.id] then
+        seen[m.id] = true
+        if ns.db.protectedItems[m.id] then
+          ns.say("already protected: " .. m.shown)
+        else
+          ns.db.protectedItems[m.id] = m.linked and m.shown or true
+          ns.say("protected: " .. m.shown)
+          added = true
+        end
+      end
+    end
+  end
+  if added then ns.play("on") end
+end
+
+-- One unkeep by item ID: the keeps window row click behind it. Only
+-- ever removes, so it never sells or exposes anything by itself.
+function ns.unkeep(id, shown)
+  if type(ns.db) ~= "table"
+    or type(ns.db.protectedItems) ~= "table" then
+    return
+  end
+  if tonumber(id) == nil or ns.db.protectedItems[id] == nil then return end
+  ns.db.protectedItems[id] = nil
+  ns.play("off")
+  ns.say("no longer protected: " .. tostring(shown or ("item:" .. id)))
+end
+
+-- Sorted keeps for the window and the chat list, so both read the
+-- same stable order instead of hash order.
+function ns.listProtectedItems()
+  local out = {}
+  for id, shown in pairs(type(ns.db) == "table"
+    and ns.db.protectedItems or {}) do
+    out[#out + 1] = { id = id,
+      shown = type(shown) == "string" and shown or ("item:" .. id) }
+  end
+  table.sort(out, function(a, b) return a.shown < b.shown end)
+  return out
 end
 
 function ns.listProtected()
-  local n = 0
-  for id, shown in pairs(ns.db.protectedItems or {}) do
-    n = n + 1
-    print("  " .. tostring(type(shown) == "string" and shown or ("item:" .. id)))
-  end
-  if n == 0 then ns.say("nothing protected")
+  local items = ns.listProtectedItems()
+  for _, it in ipairs(items) do print("  " .. tostring(it.shown)) end
+  if #items == 0 then ns.say("nothing protected")
   else ns.play("open") end
+end
+
+-- Keeps window. The visual counterpart to the slash keeps: one row
+-- per kept item (click unkeeps), and an entry box on top where
+-- shift-clicking an item inserts its link and Enter keeps it, commas
+-- ok for lists. Built like the disenchant and delete windows; when
+-- it cannot open, the chat list is the readout.
+ns.keepWindow = nil
+ns.keepRows = {}
+ns.keepBox = nil
+ns.keepBoxFocus = false
+ns.linkHooked = false
+
+-- Shift-click reception. Blizzard's own funnel, verified on both
+-- branches (ItemButtonTemplate.lua HandleModifiedItemClick calls
+-- ChatFrameUtil.InsertLink on IsModifiedClick("CHATLINK"); the
+-- Mainline override in ChatFrameUtilOverrides.lua serves the macro
+-- box, professions search, communities chat, the active chat window,
+-- and the auction house; Deprecated_ChatFrame.lua keeps the old
+-- ChatEdit_InsertLink name as an alias): a custom box gets nothing
+-- unless it hooks in. The post-hook below keeps the link only while
+-- the keeps box has focus, so normal chat shift-clicks pass through
+-- untouched. Presence-gated and pcall-guarded throughout: without
+-- the funnel or the hook API, typed entry still works.
+function ns.hookInsertLink()
+  if ns.linkHooked then return end
+  if type(hooksecurefunc) ~= "function" then return end
+  if type(ChatFrameUtil) ~= "table" then return end
+  if type(ChatFrameUtil.InsertLink) ~= "function" then return end
+  local ok = pcall(hooksecurefunc, ChatFrameUtil, "InsertLink", function(text)
+    pcall(function()
+      if not ns.keepBoxFocus then return end
+      if not (ns.keepWindow and ns.keepWindow:IsShown()) then return end
+      if type(text) ~= "string" then return end
+      if not text:find("item:", 1, true) then return end
+      ns.keepText(text)
+      ns.refreshKeepWindow()
+    end)
+  end)
+  if ok then ns.linkHooked = true end
+end
+
+function ns.ensureKeepWindow()
+  if ns.keepWindow then return ns.keepWindow end
+  if type(CreateFrame) ~= "function" then return nil end
+  if type(UIParent) ~= "table" then return nil end
+  local ok, window = pcall(CreateFrame, "Frame", "VocVendorKeepWindow",
+    UIParent, "BasicFrameTemplateWithInset")
+  if not ok or window == nil then return nil end
+  window:SetSize(280, 100)
+  window:SetPoint("CENTER")
+  window:SetMovable(true)
+  window:EnableMouse(true)
+  window:RegisterForDrag("LeftButton")
+  window:SetScript("OnDragStart", window.StartMoving)
+  window:SetScript("OnDragStop", window.StopMovingOrSizing)
+  if window.TitleText then window.TitleText:SetText("Keeps") end
+  if not window.CloseButton then
+    local closeBtn = CreateFrame("Button", nil, window, "UIPanelCloseButton")
+    if closeBtn then
+      closeBtn:SetPoint("TOPRIGHT", window, "TOPRIGHT", -4, -4)
+      closeBtn:SetScript("OnClick", function() window:Hide() end)
+    end
+  end
+  local hint = window:CreateFontString(nil, "ARTWORK", "GameFontDisable")
+  hint:SetPoint("TOPLEFT", window, "TOPLEFT", 16, -30)
+  hint:SetText("Shift-click, or type a name or ID (commas ok), then Enter")
+  local box = nil
+  local okBox, madeBox =
+    pcall(CreateFrame, "EditBox", nil, window, "InputBoxTemplate")
+  if okBox and madeBox ~= nil then box = madeBox end
+  if not box then
+    local okPlain, madePlain = pcall(CreateFrame, "EditBox", nil, window)
+    if okPlain and madePlain ~= nil then box = madePlain end
+  end
+  if box then
+    box:SetSize(248, 22)
+    box:SetPoint("TOPLEFT", window, "TOPLEFT", 16, -48)
+    if type(box.SetAutoFocus) == "function" then box:SetAutoFocus(false) end
+    box:SetScript("OnEditFocusGained", function() ns.keepBoxFocus = true end)
+    box:SetScript("OnEditFocusLost", function() ns.keepBoxFocus = false end)
+    ns.hookInsertLink()
+    box:SetScript("OnEnterPressed", function(self)
+      local text = ""
+      if type(self.GetText) == "function" then text = self:GetText() or "" end
+      if type(self.SetText) == "function" then self:SetText("") end
+      if type(self.ClearFocus) == "function" then self:ClearFocus() end
+      if strtrim(text) ~= "" then
+        ns.keepText(text)
+        ns.refreshKeepWindow()
+      end
+    end)
+    box:SetScript("OnEscapePressed", function(self)
+      if type(self.ClearFocus) == "function" then self:ClearFocus() end
+    end)
+    if type(box.HookScript) == "function" then
+      box:HookScript("OnEnter", function(self)
+        if type(IsMouseButtonDown) == "function" and IsMouseButtonDown() then return end
+        if type(GameTooltip) ~= "table" then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Shift-click, or type a name or ID; commas separate lists",
+          COLORS.text[1], COLORS.text[2], COLORS.text[3])
+        GameTooltip:Show()
+      end)
+      box:HookScript("OnLeave", function()
+        if type(GameTooltip) == "table" then GameTooltip:Hide() end
+      end)
+    end
+    ns.keepBox = box
+  end
+  window.emptyNote = window:CreateFontString(nil, "ARTWORK", "GameFontDisable")
+  window.emptyNote:SetPoint("TOPLEFT", window, "TOPLEFT", 16, -78)
+  window.emptyNote:SetText("nothing protected yet")
+  if type(UISpecialFrames) == "table" then
+    table.insert(UISpecialFrames, "VocVendorKeepWindow")
+  end
+  window:Hide()
+  window:SetScript("OnHide", function() ns.play("close") end)
+  ns.keepWindow = window
+  return window
+end
+
+-- One keeps row: the kept item's link, plain button. Clicking
+-- unkeeps it and the window re-reads the set.
+local function newKeepRow(window)
+  local ok, row = pcall(CreateFrame, "Button", nil, window)
+  if not ok or row == nil then return nil end
+  row:SetSize(248, 22)
+  row.text = row:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+  row.text:SetPoint("LEFT", row, "LEFT", 2, 0)
+  row:SetScript("OnClick", function(self)
+    ns.unkeep(self.keepID, self.keepShown)
+    ns.refreshKeepWindow()
+  end)
+  -- Tooltip contract: one white line saying what the row does.
+  row:SetScript("OnEnter", function(self)
+    if type(IsMouseButtonDown) == "function" and IsMouseButtonDown() then return end
+    if type(GameTooltip) ~= "table" then return end
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    if type(GameTooltip.SetHyperlink) == "function" then
+      pcall(GameTooltip.SetHyperlink, GameTooltip, self.keepShown)
+    end
+    GameTooltip:AddLine("Click to stop keeping",
+      COLORS.text[1], COLORS.text[2], COLORS.text[3])
+    GameTooltip:Show()
+  end)
+  row:SetScript("OnLeave", function()
+    if type(GameTooltip) == "table" then GameTooltip:Hide() end
+  end)
+  return row
+end
+
+function ns.refreshKeepWindow()
+  local window = ns.ensureKeepWindow()
+  if not window then return nil end
+  local items = ns.listProtectedItems()
+  for i = #ns.keepRows + 1, #items do
+    local row = newKeepRow(window)
+    if not row then return nil end
+    ns.keepRows[#ns.keepRows + 1] = row
+  end
+  for i, row in ipairs(ns.keepRows) do
+    local it = items[i]
+    if it then
+      row.keepID = it.id
+      row.keepShown = it.shown
+      row.text:SetText(it.shown)
+      row:ClearAllPoints()
+      row:SetPoint("TOPLEFT", window, "TOPLEFT", 16, -(78 + (i - 1) * 24))
+      row:Show()
+    else
+      row:Hide()
+    end
+  end
+  if window.emptyNote then
+    if #items == 0 then window.emptyNote:Show() else window.emptyNote:Hide() end
+  end
+  window:SetSize(280, 102 + #items * 24)
+  if not window:IsShown() then
+    window:Show()
+    ns.play("open")
+  end
+  return #items
+end
+
+-- Manual keeps path: the window is the readout, chat only when it
+-- cannot open (same fallback contract as the other lists).
+function ns.openKeeps()
+  if ns.refreshKeepWindow() then return end
+  ns.listProtected()
 end
 
 -- One full stack for a consumable link (its own max stack), nil when
@@ -965,7 +1326,7 @@ end
 -- ======= Use macros =======
 -- The sell logic already crowns one winner per buff slot
 -- (groupConsumables + rankCategory); the use macros point at those
--- winners for the five quick-use slots, so the kept stack and the
+-- winners for the six quick-use slots, so the kept stack and the
 -- macro always agree. Collection differs on purpose: the sale wants
 -- vendorable stacks (a price), use wants usable ones (your level or
 -- below, quest and collectible keeps still excluded, protect still
@@ -1030,7 +1391,7 @@ function ns.linkUsable(link)
   return true
 end
 
--- Confidently placed, usable bag consumables for the five quick-use
+-- Confidently placed, usable bag consumables for the six quick-use
 -- slots. Shares the category router and the ranker with the sale;
 -- only the collection guards differ (see above).
 function ns.groupUsables(descs)
@@ -1217,14 +1578,99 @@ function ns.flushVisit()
   if line and ns.opts().announce then ns.say(line) end
 end
 
--- Sells the gray pile via Blizzard's own API. Returns copper earned.
+-- Gray slots the keeps list protects: Poor quality the vendor
+-- would buy, kept by ID. Empty (and cheap) when nothing is kept, so
+-- every gray path below stays exactly as before until a keep exists.
+function ns.collectProtectedGrays()
+  local out = {}
+  if type(ns.db) ~= "table" or type(ns.db.protectedItems) ~= "table" then
+    return out
+  end
+  local any = false
+  for _ in pairs(ns.db.protectedItems) do any = true break end
+  if not any then return out end
+  if type(C_Container) ~= "table" then return out end
+  if type(C_Container.GetContainerNumSlots) ~= "function"
+    or type(C_Container.GetContainerItemLink) ~= "function" then
+    return out
+  end
+  if type(C_Item) ~= "table" or type(C_Item.GetItemInfo) ~= "function" then
+    return out
+  end
+  if type(Enum) ~= "table" or type(Enum.ItemQuality) ~= "table" then
+    return out
+  end
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      local link = C_Container.GetContainerItemLink(bag, slot)
+      if link and ns.isProtected(link) and ns.slotHasValue(bag, slot) then
+        local r = { pcall(C_Item.GetItemInfo, link) }
+        if r[1] and r[4] == Enum.ItemQuality.Poor then
+          out[#out + 1] = { link = link, bag = bag, slot = slot }
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- One gray click: the bulk sale minus protection (the bulk call sells
+-- set and locked slots too, so this path invents no new keeps).
+-- Returns the sold stack count, or 0 when the slot holds.
+local function attemptGraySale(it)
+  if not ns.merchantOpen() then return 0 end
+  if type(C_Container.GetContainerItemLink) ~= "function" then return 0 end
+  local okLink, now = pcall(C_Container.GetContainerItemLink, it.bag, it.slot)
+  if not okLink or now ~= it.link then return 0 end
+  if ns.isProtected(it.link) then return 0 end
+  if not ns.slotHasValue(it.bag, it.slot) then return 0 end
+  local count = ns.slotCount(it.bag, it.slot)
+  local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
+  local okGone, after = pcall(C_Container.GetContainerItemLink, it.bag, it.slot)
+  if ok and okGone and after ~= it.link then return count end
+  return 0
+end
+
+-- Sells the gray pile via Blizzard's own API. Kept grays never ride
+-- the bulk call (it sells everything), so with any kept the rest go
+-- one click at a time instead. Returns copper earned and items sold.
 function ns.sellGrays()
-  if type(C_MerchantFrame) ~= "table" then return 0 end
-  if type(C_MerchantFrame.SellAllJunkItems) ~= "function" then return 0 end
+  if type(C_MerchantFrame) ~= "table" then return 0, 0 end
+  if type(C_MerchantFrame.SellAllJunkItems) ~= "function" then return 0, 0 end
   local before = GetMoney()
-  pcall(C_MerchantFrame.SellAllJunkItems)
+  if #ns.collectProtectedGrays() == 0 then
+    local okN, n = pcall(C_MerchantFrame.GetNumJunkItems)
+    pcall(C_MerchantFrame.SellAllJunkItems)
+    local earned = GetMoney() - before
+    return (earned > 0 and earned or 0), (okN and n or 0)
+  end
+  if type(C_Container) ~= "table" then return 0, 0 end
+  if type(C_Container.GetContainerNumSlots) ~= "function"
+    or type(C_Container.GetContainerItemLink) ~= "function" then
+    return 0, 0
+  end
+  if type(C_Item) ~= "table" or type(C_Item.GetItemInfo) ~= "function" then
+    return 0, 0
+  end
+  if type(Enum) ~= "table" or type(Enum.ItemQuality) ~= "table" then
+    return 0, 0
+  end
+  local sold = 0
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      local link = C_Container.GetContainerItemLink(bag, slot)
+      if link then
+        local r = { pcall(C_Item.GetItemInfo, link) }
+        if r[1] and r[4] == Enum.ItemQuality.Poor then
+          sold = sold + attemptGraySale({ link = link, bag = bag, slot = slot })
+        end
+      end
+    end
+  end
   local earned = GetMoney() - before
-  return earned > 0 and earned or 0
+  return (earned > 0 and earned or 0), sold
 end
 
 -- Equipment-set safeguard: never sell gear in a saved equipment set.
@@ -1282,6 +1728,8 @@ local function attemptOldGearSale(it, guests)
     return "vendor closed"
   elseif C_Container.GetContainerItemLink(it.bag, it.slot) ~= it.link then
     return "moved"
+  elseif ns.isProtected(it.link) then
+    return "protected"
   elseif ns.inEquipmentSet(it.bag, it.slot) then
     return "in equipment set"
   elseif not ns.slotHasValue(it.bag, it.slot) then
@@ -1602,8 +2050,7 @@ function ns.autoSell()
   ns.reportKept(kept)
   ns.reportDead(dead)
   if junk.grayCount > 0 then
-    earned = ns.sellGrays()
-    nGray = junk.grayCount
+    earned, nGray = ns.sellGrays()
   end
   local nOld, oldValue, leftover = ns.sellOldGearItems(junk.oldGear)
   local nExp, expValue, leftoverExp = ns.sellOldGearItems(junk.expJunk)
@@ -1767,9 +2214,24 @@ function ns.onJunkButtonClick(button)
     end
     return
   end
+  -- Kept grays never ride Blizzard's own click (it sells everything),
+  -- so a pure-gray pile with keeps sells one click at a time instead.
+  local keptGray = ns.collectProtectedGrays()
+  local sellableGray = math.max(0, junk.grayCount - #keptGray)
   if #junk.oldGear == 0 and #junk.expJunk == 0 and #junk.vendorWins == 0 then
-    if type(ns.blizzJunkClick) == "function" then
-      ns.blizzJunkClick(button)
+    if #keptGray == 0 then
+      if type(ns.blizzJunkClick) == "function" then
+        ns.blizzJunkClick(button)
+      end
+      return
+    end
+    local earned, nGray = ns.sellGrays()
+    if nGray > 0 then
+      ns.sellSound()
+      ns.recordSale(nGray, earned)
+    else
+      ns.say("kept " .. (#keptGray == 1 and "1 gray"
+        or #keptGray .. " gray"))
     end
     return
   end
@@ -1781,15 +2243,15 @@ function ns.onJunkButtonClick(button)
   for _, it in ipairs(sale) do
     total = total + (it.price or 0) * (it.count or 1)
   end
-  local header = "junk to sell (" .. junk.grayCount .. " gray, "
+  local header = "junk to sell (" .. sellableGray .. " gray, "
     .. #junk.oldGear .. " old gear, " .. #junk.expJunk .. " expansion"
     .. (#junk.vendorWins > 0 and ", " .. #junk.vendorWins .. " vendor wins" or "")
     .. "):"
   ns.say(header)
   for _, g in ipairs(ns.mergeByID(sale)) do print(ns.mergedLine(g)) end
   StaticPopup_Show("VOCVENDOR_SELL_JUNK",
-    junk.grayCount + #sale, ns.moneyString(total),
-    { grayCount = junk.grayCount, oldGear = junk.oldGear,
+    sellableGray + #sale, ns.moneyString(total),
+    { grayCount = sellableGray, oldGear = junk.oldGear,
       expJunk = junk.expJunk, vendorWins = junk.vendorWins })
   ns.reportKept(kept, true)
   ns.reportDead(dead, true)
@@ -1802,8 +2264,7 @@ function ns.sellJunkNow(data)
   local nGray = 0
   ns.reportKept(ns.collectKeptDisenchantables())
   if (data.grayCount or 0) > 0 then
-    earned = ns.sellGrays()
-    nGray = data.grayCount
+    earned, nGray = ns.sellGrays()
   end
   local nOld, oldValue, leftover = ns.sellOldGearItems(data.oldGear)
   local nExp, expValue, leftoverExp = ns.sellOldGearItems(data.expJunk)
@@ -2395,6 +2856,9 @@ function ns.isOldGear(link, gap, ignoreDE, scan, why)
     if why then why.reason = reason end
     return false
   end
+  if ns.isProtected(link) then
+    return stop("kept (/vv protect)")
+  end
   if ns.isUncollectedCollectible(link, scan and scan.memo) then
     return stop("uncollected appearance, toy, or pet")
   end
@@ -2554,6 +3018,7 @@ end
 -- profession tools), and disenchantables divert to the disenchant list
 -- first unless ignoreDE.
 function ns.isExpansionJunk(link, bag, slot, ignoreDE, scan)
+  if ns.isProtected(link) then return false end
   local id = ns.expansionID(link)
   if id == nil or not ns.expansionChecked(id) then return false end
   if ns.isProfessionTool(link) then return false end
@@ -2597,6 +3062,7 @@ end
 -- confirm per item in the delete list; nothing else qualifies, and an
 -- uncached item never does.
 function ns.deadReason(link, bag, slot)
+  if ns.isProtected(link) then return nil end
   local id = ns.expansionID(link)
   if id == nil or not ns.expansionChecked(id) then return nil end
   if ns.inEquipmentSet(bag, slot) then return nil end
@@ -3147,7 +3613,7 @@ function ns.ensureSettings()
     return init
   end
   header("Selling",
-    "What counts as junk and how it sells. Item keeps live on the slash line: /vv protect keeps an item out of every sale.")
+    "What counts as junk and how it sells. Item keeps live in /vv protect: type a name or ID, or shift-click an item (commas ok), click a row to unkeep.")
   check("autoSell", "Auto-sell junk",
     "Sell junk automatically on every vendor visit. Junk is what you configure below.")
   local junkInit = check("junkOldGear", "Old gear counts as junk",
@@ -3298,7 +3764,7 @@ ns.HELP = {
   "/vv destroy       delete dead expansion items (confirms each)",
   "/vv consume       sell losing consumables",
   "/vv use           use best consumables (refresh macros)",
-  "/vv protect       keep an item out of every sale",
+  "/vv protect       open the keeps list (names, shift-click, commas ok)",
   "/vv diag          show consumable ranks",
   "/vv why           explain each gear verdict",
   "/vv dismiss-new   clear all New tags",
@@ -3367,9 +3833,10 @@ SlashCmdList.VOCVENDOR = function(msg)
     if maintained then ns.updateUseMacros() end
     ns.reportUsePicks(ns.usePicks(), maintained)
   elseif msg == "protect" then
-    ns.listProtected()
+    ns.openKeeps()
   elseif msg:sub(1, 8) == "protect " then
     ns.toggleProtect(raw:sub(9))
+    if ns.keepWindow and ns.keepWindow:IsShown() then ns.refreshKeepWindow() end
   elseif msg == "diag" then
     ns.diagConsumables()
   elseif msg == "why" then
