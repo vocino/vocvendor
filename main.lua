@@ -317,6 +317,26 @@ local function hasAny(desc, words)
   return false
 end
 
+-- Secondary offense words: useful to every spec, unlike a named
+-- primary stat. Used to order the runners-up when neither item
+-- matches the player's own stat (scrolls especially: an agility
+-- scroll, a stamina scroll and a spirit scroll can share one number).
+ns.SECONDARY_WORDS = { "critical", "haste", "mastery", "versatility",
+  "attack power", "damage", "primary stat" }
+ns.PRIMARY_WORDS = { "strength", "agility", "intellect" }
+
+-- Usefulness tier for a spell description (lower wins): the player's
+-- own primary stat, then secondary stats every spec uses, then
+-- stamina and other defenses, then another spec's primary stat, then
+-- whatever is left (spirit, resistances, ...).
+function ns.statTier(desc, stat)
+  if stat and desc:find(stat, 1, true) then return 0 end
+  if hasAny(desc, ns.SECONDARY_WORDS) then return 1 end
+  if hasAny(desc, ns.DEFENSE_WORDS) then return 2 end
+  if hasAny(desc, ns.PRIMARY_WORDS) then return 3 end
+  return 4
+end
+
 -- The item's Use-spell description, lowercased for keyword matching, or
 -- nil when the client cannot say. Presence-gated and pcall-guarded: an
 -- unknown spell keeps the item, never sells it. The optional memo shares
@@ -506,9 +526,10 @@ end
 
 -- True when a outranks b. A Well Fed experience buff always wins
 -- (the XP food the food slot exists to keep); then raw number, then
--- item level, then the player's own primary stat (a stronger
--- off-spec item still beats a weaker on-spec one), then the lower
--- item ID for determinism.
+-- item level, then stat usefulness for the player's spec (a stronger
+-- off-spec item still beats a weaker on-spec one; equal numbers fall
+-- back to most-useful-first, so an agility scroll outranks a spirit
+-- scroll for a hunter), then the lower item ID for determinism.
 function ns.consumableBetter(a, b)
   local xa, xb = ns.isXpFood(a.desc), ns.isXpFood(b.desc)
   if xa ~= xb then return xa end
@@ -516,9 +537,8 @@ function ns.consumableBetter(a, b)
   if a.ilvl ~= b.ilvl then return a.ilvl > b.ilvl end
   local stat = ns.playerStatWord()
   if stat then
-    local fa = a.desc:find(stat, 1, true) ~= nil
-    local fb = b.desc:find(stat, 1, true) ~= nil
-    if fa ~= fb then return fa end
+    local ta, tb = ns.statTier(a.desc, stat), ns.statTier(b.desc, stat)
+    if ta ~= tb then return ta < tb end
   end
   return (a.id or 0) < (b.id or 0)
 end
@@ -959,6 +979,7 @@ ns.USE_MACROS = {
   { key = "healpotion", name = "VV Health", label = "health potion" },
   { key = "manapotion", name = "VV Mana", label = "mana potion" },
   { key = "bandage", name = "VV Bandage", label = "bandage" },
+  { key = "scroll", name = "VV Scrolls", label = "scroll" },
 }
 -- 120 account + 30 character slots (MacroConstantsDocumentation,
 -- same values on both branches).
@@ -1024,7 +1045,7 @@ function ns.groupUsables(descs)
         and ns.linkUsable(link) then
         local cat = ns.consumableCategory(link, descs)
         if cat == "food" or cat == "drink" or cat == "healpotion"
-          or cat == "manapotion" or cat == "bandage" then
+          or cat == "manapotion" or cat == "bandage" or cat == "scroll" then
           if not byCat[cat] then byCat[cat] = {} end
           byCat[cat][#byCat[cat] + 1] = { link = link }
         end
@@ -3169,7 +3190,7 @@ function ns.ensureSettings()
   header("Using",
     "Use macros point at the strongest consumable in each quick-use slot.")
   check("useMacros", "Maintain use macros",
-    "Keep VV Food, VV Drink, VV Health, VV Mana and VV Bandage pointed at the strongest consumable in each slot. They update when your bags change.",
+    "Keep VV Food, VV Drink, VV Health, VV Mana, VV Bandage and VV Scrolls pointed at the strongest consumable in each slot. They update when your bags change.",
     ns.updateUseMacros)
   header("Repair", "Repairs at vendors that repair, guild funds first when allowed.")
   local repairInit = check("autoRepair", "Auto-repair",

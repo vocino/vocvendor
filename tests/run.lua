@@ -3914,4 +3914,105 @@ do
   check("vendor wins alone enable the button", b.buttonEnabled == true)
 end
 
+-- 117. VV Scrolls points at the most useful scroll. A hunter's
+-- agility scroll outranks a spirit scroll at equal numbers, stamina
+-- beats another spec's primary stat, and a stronger number still
+-- wins (the addon-wide strongest-wins contract); the sale and the
+-- macro agree on the winner.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().useMacros = true
+  w.unitStats = { [1] = 100, [2] = 500, [4] = 100 } -- agility main
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local agi = use(w, { sub = SC.Scroll,
+    desc = "use: increases agility by 50 for 30 min.", ilvl = 100 })
+  local spirit = use(w, { sub = SC.Scroll,
+    desc = "use: increases spirit by 50 for 30 min.", ilvl = 100 })
+  local stam = use(w, { sub = SC.Scroll,
+    desc = "use: increases stamina by 50 for 30 min.", ilvl = 100 })
+  local int = use(w, { sub = SC.Scroll,
+    desc = "use: increases intellect by 50 for 30 min.", ilvl = 100 })
+  check("hunter agility outranks spirit",
+    ns.consumableBetter(ns.consumablePower(agi),
+      ns.consumablePower(spirit)) == true)
+  check("stamina outranks another spec's primary",
+    ns.consumableBetter(ns.consumablePower(stam),
+      ns.consumablePower(int)) == true)
+  check("another primary outranks spirit",
+    ns.consumableBetter(ns.consumablePower(int),
+      ns.consumablePower(spirit)) == true)
+  local bigSpirit = use(w, { sub = SC.Scroll,
+    desc = "use: increases spirit by 900 for 30 min.", ilvl = 50 })
+  check("stronger off-spec number still wins",
+    ns.consumableBetter(ns.consumablePower(bigSpirit),
+      ns.consumablePower(agi)) == true)
+  putStack(w, agi, 1)
+  putStack(w, spirit, 1)
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("scroll macro points at the agility scroll",
+    w.macros["VV Scrolls"]
+      and w.macros["VV Scrolls"].body
+        == "#showtooltip\n/use item:" .. w.itemIDs[agi])
+  local sale = ns.collectConsumableSale()
+  check("sale keeps the scroll the macro points at",
+    #sale == 1 and sale[1].link == spirit)
+  w.env.SlashCmdList.VOCVENDOR("use")
+  local reported = false
+  for _, line in ipairs(w.printed) do
+    if line == "  scroll: " .. agi then reported = true end
+  end
+  check("use reports the scroll winner", reported == true)
+end
+
+-- 118. VV Scrolls needs no mana, skips unusable scrolls, and stays
+-- absent with no scrolls in the bags.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().useMacros = true
+  w.playerMana = 0
+  local SC = w.env.Enum.ItemConsumableSubclass
+  local scroll = use(w, { sub = SC.Scroll,
+    desc = "use: increases stamina by 50 for 30 min." })
+  putStack(w, scroll, 1)
+  w.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("manaless keeps scrolls",
+    w.macros["VV Scrolls"]
+      and w.macros["VV Scrolls"].body
+        == "#showtooltip\n/use item:" .. w.itemIDs[scroll])
+  local l = newWorld()
+  local nsl = loadAddon(l)
+  clientLoaded(l)
+  nsl.opts().useMacros = true
+  l.playerLevel = 10
+  local SL = l.env.Enum.ItemConsumableSubclass
+  local high = use(l, { sub = SL.Scroll, minLevel = 60,
+    desc = "use: increases agility by 900 for 30 min." })
+  local low = use(l, { sub = SL.Scroll, minLevel = 5,
+    desc = "use: increases agility by 50 for 30 min." })
+  putStack(l, high, 1)
+  putStack(l, low, 1)
+  l.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("unusable scroll skipped",
+    l.macros["VV Scrolls"]
+      and l.macros["VV Scrolls"].body
+        == "#showtooltip\n/use item:" .. l.itemIDs[low])
+  local e = newWorld()
+  local nse = loadAddon(e)
+  clientLoaded(e)
+  nse.opts().useMacros = true
+  e.frame.onEvent(nil, "BAG_UPDATE_DELAYED")
+  check("no scrolls means no scroll macro",
+    e.macros["VV Scrolls"] == nil)
+  e.env.SlashCmdList.VOCVENDOR("use")
+  local none = false
+  for _, line in ipairs(e.printed) do
+    if line == "  scroll: none in bags" then none = true end
+  end
+  check("use reports no scroll", none == true)
+end
+
 print("ok - " .. passed .. " checks passed")
