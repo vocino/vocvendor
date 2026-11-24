@@ -37,7 +37,7 @@ while kept gear waits.
 /vv on|off        auto-sell junk on vendor visits
 /vv repair        repair now
 /vv disenchant    open the disenchant list
-/vv destroy       delete dead expansion items (confirms each)
+/vv destroy       delete dead expansion items (Retail, confirms each)
 /vv consume       sell losing consumables
 /vv use           use best consumables (refresh macros)
 /vv protect       open the keeps list (names, shift-click, commas ok)
@@ -66,7 +66,7 @@ Settings > AddOns > VocVendor, or `/vv config`:
 - Sell losing consumables (default on: keep one stack of the strongest food, flask, potion and more; the rest sells with junk. Unrecognized and special items never sell)
 - Auto-sell losing consumables (default off: sell them automatically on every vendor visit. Off shows a confirm list first)
 - Maintain use macros (default off: keep VV Food, VV Drink, VV Health, VV Mana and VV Bandage pointed at the strongest consumable in each slot. They update when your bags change)
-- Vendor <expansion> items (default off, all twelve from Classic to Midnight): check an expansion to sell everything the vendor buys from it, whatever the type. All keep gates still hold; dead leftovers the vendor refuses collect for confirmed delete instead
+- Vendor <expansion> items (Retail only; default off, all twelve from Classic to Midnight): check an expansion to sell everything the vendor buys from it, whatever the type. All keep gates still hold; dead leftovers the vendor refuses collect for confirmed delete instead. Hidden on the Forever client, which has no expansions
 
 Every change applies at once. Child options disable while their parent
 is off (old-gear details need old gear, auto-selling consumables
@@ -88,11 +88,11 @@ set, never anything AutoGear rates above what you wear when it is
 installed (the same veto Pawn gives on retail), never anything
 Pawn flags as an upgrade when Pawn is
 installed, never BoE or Warbound unless you opt them in, and never an
-uncollected transmog appearance, toy, or pet. Check an expansion and
-the gap no longer applies to it: every vendorable item from a checked
-expansion sells, whatever the type, except confidently placed
-consumables, which defer to the consumable sale (winners keep their
-stack there instead), with the same gates holding
+uncollected transmog appearance, toy, or pet. On Retail, check an
+expansion and the gap no longer applies to it: every vendorable item
+from a checked expansion sells, whatever the type, except confidently
+placed consumables, which defer to the consumable sale (winners keep
+their stack there instead), with the same gates holding
 (equipment sets, transmog and toys and pets, Pawn upgrades, live quest
 items, heirlooms, profession tools, auction value). Disenchantables still divert to the
 disenchant list first for enchanters. Each
@@ -107,7 +107,7 @@ Repairs mirror the merchant frame's own buttons: guild bank
 first when allowed, your gold otherwise, and only when you can pay.
 Gear kept for disenchanting (uncommon, rare, or epic, for enchanters) opens a
 click-to-disenchant window instead: one row per item, each click
-disenchants that bag slot, and the list tracks the bags until empty. Dead items from checked expansions that the vendor refuses (completed-quest leftovers, artifact-power tokens) open a click-to-delete list instead: one row per item, each click asks once and then deletes that bag slot, and deletions are always announced. Moving items between bank and bags stays in VocWarbank (/vw Empty and Deposit); this addon only clears bags; moving between bank and bags stays in VocWarbank (/vw Empty and Deposit).
+disenchants that bag slot, and the list tracks the bags until empty. Dead items from checked expansions that the vendor refuses (completed-quest leftovers, artifact-power tokens) open a click-to-delete list instead: one row per item, each click asks once and then deletes that bag slot, and deletions are always announced. Expansions and dead items are Retail-only; the Forever client has no expansions. Moving items between bank and bags stays in VocWarbank (/vw Empty and Deposit); this addon only clears bags; moving between bank and bags stays in VocWarbank (/vw Empty and Deposit).
 
 ## What's inside
 

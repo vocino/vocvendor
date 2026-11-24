@@ -15,4 +15,5 @@
 ## X-Curse-Project-ID: 1733656
 ## X-Wago-ID: ANz7nV64
 
+Compat.lua
 main.lua

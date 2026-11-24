@@ -48,6 +48,8 @@ read_globals = {
   "CanGuildBankRepair", "CanMerchantRepair", "GetRepairAllCost",
   "RepairAllItems", -- mirror of the merchant repair buttons (live + forever)
   "Settings", -- native panel, retried at PLAYER_LOGIN (live + forever)
+  "GetBuildInfo", -- Interface-version flavor fallback in Compat.lua (BuildDocumentation, live + forever)
+  "WOW_PROJECT_CAMELOT", "WOW_PROJECT_ID", "WOW_PROJECT_MAINLINE", -- flavor identity, read only in Compat.lua
   "CreateSettingsListSectionHeaderInitializer", -- section headers, presence-gated (live + forever)
   "GetServerTime", -- New-tag horizon clock, presence-gated (live + forever)
   "MinimalSliderWithSteppersMixin", -- slider label formatter, presence-gated

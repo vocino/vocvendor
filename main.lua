@@ -25,7 +25,8 @@
 --     FrameXML technique shared with VocWarbank (presence-gated).
 --   C_Item.GetItemInfo returns, in order: name, link, quality, level,
 --     minLevel, type, subType, stackCount, equipLoc, texture, sellPrice(11),
---     classID(12), subclassID(13), bindType(14), ... (ItemDocumentation).
+--     classID(12), subclassID(13), bindType(14), expansionID(15), setID(16),
+--     isCraftingReagent(17), ... (ItemDocumentation).
 --   Enum.ItemBind.OnEquip (2) = BoE; Enum.ItemQuality.Heirloom (7).
 --   C_Container.UseContainerItem on a bag slot sells the item while a
 --     merchant window is open (the same action as right-clicking it).
@@ -76,13 +77,18 @@ local COLORS = ns.COLORS
 
 -- ======= Junk definition and defaults =======
 -- The junk definition. Grays are always junk (Blizzard's own baseline,
--- and what the native button's tooltip promises). Old gear joins the
+-- and what the native button's tooltip promises), except crafting
+-- reagents, which always keep. Old gear joins the
 -- definition only when the player opts in: then it sells automatically
 -- AND on the Sell Junk button, so the default stays safe. Checked
 -- expansions join the same way, per expansion, across every item type:
--- whatever the vendor buys from a checked expansion sells. Dead
+-- whatever the vendor buys from a checked expansion sells, except
+-- crafting reagents and confidently placed consumables, which keep. Dead
 -- leftovers the vendor refuses (dead quest items, artifact-power
 -- tokens) collect in the delete list instead, one confirm per item.
+-- The checklist is Retail-only (Compat.hasExpansions): Forever has no
+-- expansions, so the rows stay hidden there and every collector below
+-- stays empty.
 --
 -- The expansion checklist. One opt-in row per expansion, all off:
 -- checking an expansion vendors every vendorable item from it. IDs are
@@ -1578,9 +1584,57 @@ function ns.flushVisit()
   if line and ns.opts().announce then ns.say(line) end
 end
 
--- Gray slots the keeps list protects: Poor quality the vendor
--- would buy, kept by ID. Empty (and cheap) when nothing is kept, so
--- every gray path below stays exactly as before until a keep exists.
+-- Gray slots that never sell: Poor quality the vendor would buy that
+-- is either kept by ID or a crafting reagent (profession fuel). Reagents
+-- keep by Blizzard's own flag, not the keeps list, so a Poor reagent
+-- never rides the bulk sale either. collectProtectedGrays stays the
+-- keeps-list half (cheap when nothing is kept); collectKeptGrays is the
+-- union every gray path below uses, so every path stays exactly as
+-- before until a keep or a Poor reagent exists.
+function ns.collectReagentGrays()
+  local out = {}
+  if type(C_Container) ~= "table" then return out end
+  if type(C_Container.GetContainerNumSlots) ~= "function"
+    or type(C_Container.GetContainerItemLink) ~= "function" then
+    return out
+  end
+  if type(C_Item) ~= "table" or type(C_Item.GetItemInfo) ~= "function" then
+    return out
+  end
+  if type(Enum) ~= "table" or type(Enum.ItemQuality) ~= "table" then
+    return out
+  end
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      local link = C_Container.GetContainerItemLink(bag, slot)
+      if link and ns.slotHasValue(bag, slot) and ns.isCraftingReagent(link) then
+        local r = { pcall(C_Item.GetItemInfo, link) }
+        if r[1] and r[4] == Enum.ItemQuality.Poor then
+          out[#out + 1] = { link = link, bag = bag, slot = slot }
+        end
+      end
+    end
+  end
+  return out
+end
+
+function ns.collectKeptGrays()
+  local out, seen = {}, {}
+  for _, list in ipairs({ ns.collectProtectedGrays(), ns.collectReagentGrays() }) do
+    for _, it in ipairs(list) do
+      local key = it.bag .. ":" .. it.slot
+      if not seen[key] then
+        seen[key] = true
+        out[#out + 1] = it
+      end
+    end
+  end
+  return out
+end
+
+-- The keeps-list half: Poor quality the vendor would buy, kept by ID.
+-- Empty (and cheap) when nothing is kept.
 function ns.collectProtectedGrays()
   local out = {}
   if type(ns.db) ~= "table" or type(ns.db.protectedItems) ~= "table" then
@@ -1615,8 +1669,8 @@ function ns.collectProtectedGrays()
   return out
 end
 
--- One gray click: the bulk sale minus protection (the bulk call sells
--- set and locked slots too, so this path invents no new keeps).
+-- One gray click: the bulk sale minus keeps and reagents (the bulk call
+-- sells set and locked slots too, so this path invents no new keeps).
 -- Returns the sold stack count, or 0 when the slot holds.
 local function attemptGraySale(it)
   if not ns.merchantOpen() then return 0 end
@@ -1624,6 +1678,7 @@ local function attemptGraySale(it)
   local okLink, now = pcall(C_Container.GetContainerItemLink, it.bag, it.slot)
   if not okLink or now ~= it.link then return 0 end
   if ns.isProtected(it.link) then return 0 end
+  if ns.isCraftingReagent(it.link) then return 0 end
   if not ns.slotHasValue(it.bag, it.slot) then return 0 end
   local count = ns.slotCount(it.bag, it.slot)
   local ok = pcall(C_Container.UseContainerItem, it.bag, it.slot)
@@ -1632,14 +1687,15 @@ local function attemptGraySale(it)
   return 0
 end
 
--- Sells the gray pile via Blizzard's own API. Kept grays never ride
--- the bulk call (it sells everything), so with any kept the rest go
--- one click at a time instead. Returns copper earned and items sold.
+-- Sells the gray pile via Blizzard's own API. Kept grays (keeps list
+-- plus crafting reagents) never ride the bulk call (it sells
+-- everything), so with any kept the rest go one click at a time instead.
+-- Returns copper earned and items sold.
 function ns.sellGrays()
   if type(C_MerchantFrame) ~= "table" then return 0, 0 end
   if type(C_MerchantFrame.SellAllJunkItems) ~= "function" then return 0, 0 end
   local before = GetMoney()
-  if #ns.collectProtectedGrays() == 0 then
+  if #ns.collectKeptGrays() == 0 then
     local okN, n = pcall(C_MerchantFrame.GetNumJunkItems)
     pcall(C_MerchantFrame.SellAllJunkItems)
     local earned = GetMoney() - before
@@ -1734,6 +1790,8 @@ local function attemptOldGearSale(it, guests)
     return "in equipment set"
   elseif not ns.slotHasValue(it.bag, it.slot) then
     return "vendor won't buy"
+  elseif ns.isProfessionTool(it.link) then
+    return "profession tool"
   elseif ns.opts().compareAuction then
     local auction = ns.getAuctionPrice(it.link, nil, guests)
     local deValue = ns.isDisenchantable(it.link) and ns.getDisenchantValue(it.link, nil, guests) or nil
@@ -1812,6 +1870,7 @@ function ns.isVendorWins(link, bag, slot, scan, guests)
     return false
   end
   if ns.isProtected(link) then return false end
+  if ns.isCraftingReagent(link) then return false end
   if ns.inEquipmentSet(bag, slot) then return false end
   if not ns.slotHasValue(bag, slot) then return false end
   if type(C_Item) ~= "table"
@@ -1821,12 +1880,14 @@ function ns.isVendorWins(link, bag, slot, scan, guests)
   local r = { pcall(C_Item.GetItemInfo, link) }
   if not r[1] then return false end
   -- Past the pcall flag: quality is the 3rd return, the vendor price
-  -- the 11th, class the 12th, bind type the 14th.
+  -- the 11th, class the 12th, bind type the 14th, reagent the 17th.
   local quality, sellPrice, classID, bindType = r[4], r[12], r[13], r[15]
   if not quality then return false end
   if quality == Enum.ItemQuality.Poor then return false end
   if quality == Enum.ItemQuality.Heirloom then return false end
   if not sellPrice or sellPrice == 0 then return false end
+  -- Crafting reagents never sell here, whatever the vendor offers.
+  if r[18] == true then return false end
   -- Consumables defer to the consumable sale (winners keep a stack
   -- there); this sweep never thins them, categorized or not.
   if type(Enum) == "table" and type(Enum.ItemClass) == "table"
@@ -1911,6 +1972,8 @@ local function attemptVendorWinsSale(it, guests)
     return "in equipment set", 0
   elseif not ns.slotHasValue(it.bag, it.slot) then
     return "vendor won't buy", 0
+  elseif ns.isProfessionTool(it.link) then
+    return "profession tool", 0
   elseif ns.opts().compareAuction then
     local auction = ns.getAuctionPrice(it.link, nil, guests)
     local deValue = ns.isDisenchantable(it.link)
@@ -2214,9 +2277,10 @@ function ns.onJunkButtonClick(button)
     end
     return
   end
-  -- Kept grays never ride Blizzard's own click (it sells everything),
-  -- so a pure-gray pile with keeps sells one click at a time instead.
-  local keptGray = ns.collectProtectedGrays()
+  -- Kept grays (keeps list plus crafting reagents) never ride
+  -- Blizzard's own click (it sells everything), so a pure-gray pile
+  -- with keeps sells one click at a time instead.
+  local keptGray = ns.collectKeptGrays()
   local sellableGray = math.max(0, junk.grayCount - #keptGray)
   if #junk.oldGear == 0 and #junk.expJunk == 0 and #junk.vendorWins == 0 then
     if #keptGray == 0 then
@@ -2497,8 +2561,8 @@ end
 -- Expansion data: the item's own expansion ID (C_Item.GetItemInfo
 -- return 15, verified against Blizzard's generated docs on live and
 -- forever). Fail closed: an unknown item, or an uncached one, is never
--- expansion junk and never a dead item. Grays are unaffected:
--- Blizzard's own sale takes them all.
+-- expansion junk and never a dead item. Grays are unaffected here:
+-- the gray sale owns them (reagents keep there too, by flag).
 function ns.expansionID(link)
   if type(C_Item) ~= "table" then return nil end
   if type(C_Item.GetItemInfo) ~= "function" then return nil end
@@ -2507,10 +2571,27 @@ function ns.expansionID(link)
   return tonumber(r[16]) -- 15th return, past the pcall flag
 end
 function ns.expansionChecked(id)
+  -- Retail-only checklist: Forever has no expansions (Compat).
+  if not ns.hasExpansions() then return false end
   for _, e in ipairs(ns.EXPANSIONS) do
     if e.id == id then return ns.opts()["sell" .. e.key] == true end
   end
   return false
+end
+
+-- Crafting reagents always keep: the vendor buys them, but they are
+-- profession fuel, not junk (e.g. Pristine Hide). Blizzard's own flag
+-- (C_Item.GetItemInfo 17th return, ItemDocumentation on live + forever)
+-- names them directly, so no class heuristic is needed. Fail closed the
+-- safe way: without the API, or a failed or uncached read, nothing
+-- counts as a reagent here, and the callers keep unknown items anyway.
+function ns.isCraftingReagent(link)
+  if not link then return false end
+  if type(C_Item) ~= "table" then return false end
+  if type(C_Item.GetItemInfo) ~= "function" then return false end
+  local r = { pcall(C_Item.GetItemInfo, link) }
+  if not r[1] then return false end
+  return r[18] == true -- 17th return, past the pcall flag
 end
 
 -- Quest guard: quest-class items and quest-bound items keep unless the
@@ -2811,11 +2892,13 @@ function ns.checkCollectible(itemID, link)
 end
 -- Profession implements are tools, not junk: fishing poles, skinning
 -- knives, mining picks, and profession-class tools/gear. A Classic
--- skinning knife is Miscellaneous sitting in a weapon slot; DF+
--- implements are ItemClass Profession (19, verified in
--- ItemConstantsDocumentation on live + forever) or sit in the
--- profession equip slots. Fail closed: without the item API nothing
--- counts as a tool here, and the callers keep unknown items anyway.
+-- skinning knife is a Weapon-class Generic-subclass implement sitting
+-- in a weapon slot (Forever database: One-Hand Miscellaneous with
+-- damage, class 2 sub 14); DF+ implements are ItemClass Profession
+-- (19, verified in ItemConstantsDocumentation on live + forever) or
+-- sit in the profession equip slots. Fail closed: without the item
+-- API nothing counts as a tool here, and the callers keep unknown
+-- items anyway.
 function ns.isProfessionTool(link)
   if type(C_Item) ~= "table" then return false end
   if type(C_Item.GetItemInfoInstant) ~= "function" then return false end
@@ -2827,11 +2910,22 @@ function ns.isProfessionTool(link)
   local Miscellaneous = Enum.ItemClass.Miscellaneous or 15
   if classID == Profession then return true end
   local fishingpole = 20
-  if type(Enum.ItemWeaponSubclass) == "table"
-    and Enum.ItemWeaponSubclass.Fishingpole ~= nil then
-    fishingpole = Enum.ItemWeaponSubclass.Fishingpole
+  local generic = 14
+  if type(Enum.ItemWeaponSubclass) == "table" then
+    if Enum.ItemWeaponSubclass.Fishingpole ~= nil then
+      fishingpole = Enum.ItemWeaponSubclass.Fishingpole
+    end
+    if Enum.ItemWeaponSubclass.Generic ~= nil then
+      generic = Enum.ItemWeaponSubclass.Generic
+    end
   end
   if classID == Enum.ItemClass.Weapon and subClassID == fishingpole then
+    return true
+  end
+  -- Weapon/Generic implements (skinning knives, mining picks): real
+  -- weapons always carry a specific subclass (dagger, sword, ...),
+  -- while the profession implements share the Generic slot.
+  if classID == Enum.ItemClass.Weapon and subClassID == generic then
     return true
   end
   if equipLoc == "INVTYPE_PROFESSION_TOOL"
@@ -3010,7 +3104,8 @@ function ns.collectOldGear()
 end
 
 -- Expansion junk: everything the vendor buys from a checked expansion,
--- whatever the type, except confidently placed consumables: those belong
+-- whatever the type, except crafting reagents (profession fuel, never
+-- junk) and confidently placed consumables: those belong
 -- to the consumable sale, where winners keep one stack and losers sell
 -- with a summary. The check on the row is the consent, so the ilvl
 -- gap does not apply here; every keep gate does (equipment sets,
@@ -3018,7 +3113,10 @@ end
 -- profession tools), and disenchantables divert to the disenchant list
 -- first unless ignoreDE.
 function ns.isExpansionJunk(link, bag, slot, ignoreDE, scan)
+  -- Retail-only: Forever has no expansions (Compat).
+  if not ns.hasExpansions() then return false end
   if ns.isProtected(link) then return false end
+  if ns.isCraftingReagent(link) then return false end
   local id = ns.expansionID(link)
   if id == nil or not ns.expansionChecked(id) then return false end
   if ns.isProfessionTool(link) then return false end
@@ -3042,6 +3140,7 @@ end
 
 function ns.collectExpansionJunk()
   local out = {}
+  if not ns.hasExpansions() then return out end
   local scan = { canDE = ns.canDisenchant(), memo = {}, descs = {} }
   for bag = 0, NUM_BAG_SLOTS do
     local slots = C_Container.GetContainerNumSlots(bag)
@@ -3062,6 +3161,8 @@ end
 -- confirm per item in the delete list; nothing else qualifies, and an
 -- uncached item never does.
 function ns.deadReason(link, bag, slot)
+  -- Retail-only: the delete list is checked-expansion leftovers (Compat).
+  if not ns.hasExpansions() then return nil end
   if ns.isProtected(link) then return nil end
   local id = ns.expansionID(link)
   if id == nil or not ns.expansionChecked(id) then return nil end
@@ -3080,6 +3181,7 @@ end
 
 function ns.collectDeadItems()
   local out = {}
+  if not ns.hasExpansions() then return out end
   for bag = 0, NUM_BAG_SLOTS do
     local slots = C_Container.GetContainerNumSlots(bag)
     for slot = 1, slots do
@@ -3102,6 +3204,7 @@ end
 -- Only non-empty when the toggle is on, the player can disenchant, and
 -- something is actually for sale; everyone else skips the scan.
 function ns.anyExpansionChecked()
+  if not ns.hasExpansions() then return false end
   for _, e in ipairs(ns.EXPANSIONS) do
     if ns.opts()["sell" .. e.key] == true then return true end
   end
@@ -3667,13 +3770,17 @@ function ns.ensureSettings()
   header("Announcements", "Chat lines for sells, repairs, and new settings.")
   check("announce", "Chat announcements",
     "Print a line when VocVendor sells or repairs.")
-  header("Expansions",
-    "Check an expansion to sell everything the vendor buys from it. Dead leftovers the vendor refuses collect for confirmed delete instead.")
-  for _, e in ipairs(ns.EXPANSIONS) do
-    local ename = "Vendor " .. e.label .. " items"
-    if e.id == ns.CURRENT_EXPANSION_ID then ename = ename .. " (current)" end
-    check("sell" .. e.key, ename,
-      "Sell everything the vendor buys from " .. e.label .. " when checked. Dead leftovers the vendor refuses collect for confirmed delete instead.")
+  -- Retail-only: Forever has no expansions, so the checklist stays
+  -- hidden there instead of showing rows that could never apply.
+  if ns.hasExpansions() then
+    header("Expansions",
+      "Check an expansion to sell everything the vendor buys from it. Dead leftovers the vendor refuses collect for confirmed delete instead. (Retail only)")
+    for _, e in ipairs(ns.EXPANSIONS) do
+      local ename = "Vendor " .. e.label .. " items"
+      if e.id == ns.CURRENT_EXPANSION_ID then ename = ename .. " (current)" end
+      check("sell" .. e.key, ename,
+        "Sell everything the vendor buys from " .. e.label .. " when checked. Dead leftovers the vendor refuses collect for confirmed delete instead.")
+    end
   end
   ns.settingsBuilt = true
   ns.settingsCategory = category

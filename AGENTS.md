@@ -2,7 +2,8 @@
 
 ## Code Map
 
-- `main.lua`: the whole addon: the junk definition (grays, old gear, per-expansion checklist, delete list), auto-sell, auto-repair, the native Sell Junk hook, auction/disenchant compare, the merchant search box, the disenchant and delete windows, consumable keep-winner-sell-rest, Settings panel, slash, compartment
+- `Compat.lua`: flavor home (FAMILY.md "Dual clients, one codebase"): `IS_RETAIL`/`IS_FOREVER`/`FLAVOR` plus `hasExpansions()` (Retail-only) and `hasAPI()`; nothing checks flavor outside it
+- `main.lua`: the addon: the junk definition (grays, old gear, Retail-only per-expansion checklist, delete list), auto-sell, auto-repair, the native Sell Junk hook, auction/disenchant compare, the merchant search box, the disenchant and delete windows, consumable keep-winner-sell-rest, Settings panel, slash, compartment
 - `VocVendor.toc` / `VocVendor_Camelot.toc`: addon metadata (dual toc,
   shared `main.lua`; no `RequiredDeps`)
 - `tests/run.lua`: stub-harness regression tests (`lua tests/run.lua`)

@@ -6,6 +6,7 @@
 -- handler, and asserts. Any failed assert aborts with the test name.
 
 local testDir = debug.getinfo(1, "S").source:gsub("\\", "/"):match("@?(.*/)") or ""
+local compatPath = testDir .. "../Compat.lua"
 local mainPath = testDir .. "../main.lua"
 
 local passed = 0
@@ -22,11 +23,17 @@ local function loadAddon(world)
   g.print = function(...) world.printed[#world.printed + 1] = table.concat({...}, " ") end
   g.strtrim = function(s) return (tostring(s or ""):gsub("^%s*(.-)%s*$", "%1")) end
   g.SlashCmdList = {}
+  -- Flavor identity: 1 is the mainline project, 18 the camelot one, so
+  -- the default world is Retail; set world.forever before loadAddon for
+  -- the Forever client. Compat.lua alone reads these.
+  g.WOW_PROJECT_MAINLINE = 1
+  g.WOW_PROJECT_CAMELOT = 18
+  g.WOW_PROJECT_ID = world.forever and 18 or 1
   g.NUM_BAG_SLOTS = 4
   g.Enum = {
     ItemClass = { Consumable = 0, Weapon = 2, Armor = 4,
       Miscellaneous = 15, Profession = 19 },
-    ItemWeaponSubclass = { Fishingpole = 20 },
+    ItemWeaponSubclass = { Generic = 14, Fishingpole = 20 },
     ItemConsumableSubclass = { Generic = 0, Potion = 1, Elixir = 2,
       Flasksphials = 3, Scroll = 4, Fooddrink = 5, Itemenhancement = 6,
       Bandage = 7, Other = 8, VantusRune = 9, UtilityCurio = 10,
@@ -88,11 +95,15 @@ local function loadAddon(world)
     end,
     GetItemInfo = function(link)
       if world.uncached[link] then return nil end
+      -- 17th return is Blizzard's own isCraftingReagent flag
+      -- (ItemDocumentation, live + forever); world.reagents[link]
+      -- marks it in the harness.
+      local reagent = world.reagents[link] == true and true or nil
       return link, link, world.rarities[link], world.levels[link],
         world.minLevels[link], nil, nil, world.maxStacks[link], world.slots[link],
         world.textures[link],
         world.prices[link], world.classIDs[link], world.subclassIDs[link],
-        world.bindTypes[link], world.expansions[link], world.setIDs[link], nil, nil
+        world.bindTypes[link], world.expansions[link], world.setIDs[link], reagent, nil
     end,
     GetDetailedItemLevelInfo = function(link) return world.levels[link] end,
     IsItemBindToAccountUntilEquip = function(link) return world.warbound[link] == true end,
@@ -478,16 +489,20 @@ local function loadAddon(world)
     end
   end
 
-  local src = assert(io.open(mainPath, "r")):read("*a")
-  local chunk
-  if setfenv then
-    chunk = assert(loadstring(src, "@" .. mainPath))
-    setfenv(chunk, g)
-  else
-    chunk = assert(load(src, "@" .. mainPath, "t", g))
+  -- Both tocs list Compat.lua before main.lua; the harness loads the
+  -- same order into one namespace.
+  local function loadFile(path)
+    local src = assert(io.open(path, "r")):read("*a")
+    if setfenv then
+      local chunk = assert(loadstring(src, "@" .. path))
+      setfenv(chunk, g)
+      return chunk
+    end
+    return assert(load(src, "@" .. path, "t", g))
   end
   local ns = {}
-  chunk("VocVendor", ns)
+  loadFile(compatPath)("VocVendor", ns)
+  loadFile(mainPath)("VocVendor", ns)
   -- Blizzard's own merchant rows, created after the event frame so
   -- world.frames[1] stays the event frame.
   world.merchantButtons = {}
@@ -510,7 +525,7 @@ local function newWorld()
   return {
     bags = {}, slots = {}, minLevels = {}, levels = {}, classIDs = {},
     subclassIDs = {}, rarities = {}, prices = {}, bindTypes = {},
-    setIDs = {}, itemIDs = {}, uncached = {}, warbound = {}, equipSets = {}, expansions = {},
+    setIDs = {}, itemIDs = {}, uncached = {}, warbound = {}, equipSets = {}, expansions = {}, reagents = {},
     equipped = {}, printed = {}, frames = {}, gametip = { lines = {}, colors = {} },
     macros = {}, macroSeq = 0, macroEdits = 0, playerLevel = 60, playerMana = 100,
     textures = {},
@@ -564,6 +579,7 @@ local function gear(w, o)
   -- pass expansion = 11 for current-expansion (Midnight) gear.
   w.expansions[link] = o.expansion or 10
   if o.warbound then w.warbound[link] = true end
+  if o.reagent then w.reagents[link] = true end
   return link
 end
 
@@ -2914,38 +2930,68 @@ do
 end
 
 -- 81b. Profession tools never sell, whatever the sweep: a Classic
--- skinning knife (Miscellaneous, weapon slot), a Profession-class tool,
--- and a fishing pole all keep when their expansion is checked.
+-- skinning knife (Weapon/Generic in a weapon slot, Forever ID 7005),
+-- a legacy Miscellaneous implement, a Profession-class tool, and a
+-- fishing pole all keep when their expansion is checked. The click
+-- guards hold them too, so a stale list reports "profession tool"
+-- instead of a misleading auction verdict.
 do
   local w = newWorld()
   local ns = loadAddon(w)
   clientLoaded(w)
   ns.opts().junkOldGear = true
   ns.opts().sellClassic = true
+  ns.opts().sellVendorWins = true
   w.equipped[16] = gear(w, { slot = "INVTYPE_2HWEAPON", classID = 2, level = 400 })
   local WSC = w.env.Enum.ItemWeaponSubclass
-  local knife = gear(w, { slot = "INVTYPE_WEAPON", classID = 15, sub = 4,
+  local knife = gear(w, { slot = "INVTYPE_WEAPON", classID = 2, sub = WSC.Generic,
+    level = 4, price = 16, expansion = 0 })
+  local legacy = gear(w, { slot = "INVTYPE_WEAPON", classID = 15, sub = 4,
     level = 4, price = 16, expansion = 0 })
   local pick = gear(w, { slot = "INVTYPE_PROFESSION_TOOL", classID = 19, sub = 10,
     level = 1, price = 100, expansion = 0 })
   local pole = gear(w, { slot = "INVTYPE_2HWEAPON", classID = 2,
     sub = WSC.Fishingpole, level = 10, price = 100, expansion = 0 })
+  local real = gear(w, { slot = "INVTYPE_2HWEAPON", classID = 2, sub = 7,
+    level = 300, price = 100, expansion = 0 })
   local bKnife, sKnife = putBag(w, knife)
+  local bLegacy, sLegacy = putBag(w, legacy)
   local bPick, sPick = putBag(w, pick)
   local bPole, sPole = putBag(w, pole)
+  local _, _ = putBag(w, real)
   check("skinning knife is a profession tool", ns.isProfessionTool(knife) == true)
+  check("legacy misc implement is a profession tool", ns.isProfessionTool(legacy) == true)
   check("profession-class tool is a profession tool", ns.isProfessionTool(pick) == true)
   check("fishing pole is a profession tool", ns.isProfessionTool(pole) == true)
+  check("real weapon is not a profession tool", ns.isProfessionTool(real) == false)
   check("knife never old gear", ns.isOldGear(knife, 30) == false)
   check("pole never old gear", ns.isOldGear(pole, 30) == false)
+  check("real weapon still old gear", ns.isOldGear(real, 30) == true)
   check("knife never expansion junk",
     ns.isExpansionJunk(knife, bKnife, sKnife) == false)
+  check("legacy never expansion junk",
+    ns.isExpansionJunk(legacy, bLegacy, sLegacy) == false)
   check("profession tool never expansion junk",
     ns.isExpansionJunk(pick, bPick, sPick) == false)
   check("pole never expansion junk",
     ns.isExpansionJunk(pole, bPole, sPole) == false)
-  check("tools excluded from the old-gear sweep", #ns.collectOldGear() == 0)
-  check("tools excluded from the expansion sweep", #ns.collectExpansionJunk() == 0)
+  check("tools excluded from the old-gear sweep", #ns.collectOldGear() == 1)
+  check("tools excluded from the expansion sweep", #ns.collectExpansionJunk() == 1)
+  w.merchantOpen = true
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function(_, _) return 99 end,
+  } } }
+  check("knife never vendor wins",
+    ns.isVendorWins(knife, bKnife, sKnife) == false)
+  check("real weapon still vendor wins",
+    ns.isVendorWins(real, 0, 5) == true)
+  -- Click-time guard: a tool on a stale candidate list holds with its
+  -- own reason, never a net-profit verdict (vendor 16c vs 94c net).
+  local n, _, leftover = ns.sellOldGearItems({ { link = knife, bag = bKnife,
+    slot = sKnife, price = 16 } })
+  check("stale tool never sells on the old-gear click", n == 0 and #w.sold == 0)
+  check("stale tool reports its own reason",
+    #leftover == 1 and leftover[1].reason == "profession tool")
 end
 
 -- 82. Sale guards and diagnosis: a closed vendor stops cleanly, taint
@@ -4285,6 +4331,110 @@ do
     if line == "  scroll: none in bags" then none = true end
   end
   check("use reports no scroll", none == true)
+end
+
+-- 119. Crafting reagents always keep: Pristine Hide (Uncommon reagent
+-- from a checked expansion) never sells as expansion junk, vendor
+-- wins, or grays.
+do
+  local w = newWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  ns.opts().sellLegion = true
+  -- Pristine Hide shape: Uncommon crafting reagent the vendor buys.
+  local hide = gear(w, { slot = "", classID = 7, rarity = 2, level = 45,
+    price = 50, expansion = 6, reagent = true })
+  check("reagent flag reads", ns.isCraftingReagent(hide) == true)
+  local plain = gear(w, { slot = "", classID = 7, rarity = 2, level = 45,
+    price = 50, expansion = 6 })
+  check("plain trade good is not a reagent",
+    ns.isCraftingReagent(plain) == false)
+  check("unknown link is not a reagent",
+    ns.isCraftingReagent(nil) == false)
+  local hb, hs = putBag(w, hide)
+  check("checked-expansion reagent keeps",
+    ns.isExpansionJunk(hide, hb, hs) == false)
+  local pb, ps = putBag(w, plain)
+  check("plain trade good still sells",
+    ns.isExpansionJunk(plain, pb, ps) == true)
+  check("reagent excluded from the sweep",
+    #ns.collectExpansionJunk() == 1)
+  -- Vendor wins never takes reagents, whatever the vendor offers.
+  w.env.Auctionator = { API = { v1 = {
+    GetAuctionPriceByItemID = function() return 1 end,
+  } } }
+  ns.opts().sellVendorWins = true
+  check("reagent never vendor-wins",
+    ns.isVendorWins(hide, hb, hs) == false)
+  -- Poor reagents keep out of the bulk gray sale too.
+  local g = newWorld()
+  local nsg = loadAddon(g)
+  clientLoaded(g)
+  local poorReagent = gear(g, { slot = "", classID = 7, rarity = 0,
+    price = 5, expansion = 6, reagent = true })
+  local poorJunk = gear(g, { slot = "", classID = 0, rarity = 0,
+    price = 5, expansion = 6 })
+  local gb1, gs1 = putBag(g, poorReagent)
+  putBag(g, poorJunk)
+  g.noValues["0:" .. gs1] = false
+  check("poor reagent collects as kept",
+    #nsg.collectReagentGrays() == 1)
+  check("kept grays union the reagent",
+    #nsg.collectKeptGrays() == 1)
+  g.junkCount = 2
+  g.junkValue = 10
+  nsg.sellGrays()
+  check("bulk sale skipped for a reagent gray",
+    g.junkSold ~= true and #g.sold == 1)
+end
+
+-- 120. Expansions are Retail-only: on Forever nothing is checked, the
+-- rows stay hidden, and the collectors stay empty.
+do
+  local w = newWorld()
+  w.forever = true
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  check("forever flavor",
+    ns.FLAVOR == "forever" and ns.hasExpansions() == false)
+  check("retail flavor by default",
+    (function()
+      local r = newWorld()
+      local nsr = loadAddon(r)
+      return nsr.FLAVOR == "retail" and nsr.hasExpansions() == true
+    end)() == true)
+  ns.opts().sellLegion = true
+  check("forever never checked", ns.expansionChecked(6) == false)
+  check("forever checklist empty", ns.anyExpansionChecked() == false)
+  local legionGear = gear(w, { slot = "INVTYPE_HEAD", level = 395,
+    rarity = 1, expansion = 6 })
+  local lb, ls = putBag(w, legionGear)
+  check("forever gear never expansion junk",
+    ns.isExpansionJunk(legionGear, lb, ls) == false)
+  check("forever sweep empty", #ns.collectExpansionJunk() == 0)
+  local ap = gear(w, { classID = 0, expansion = 6, price = 0 })
+  w.artifactPower[ap] = true
+  local ab, as = putBag(w, ap)
+  check("forever dead reason nil", ns.deadReason(ap, ab, as) == nil)
+  check("forever delete list empty", #ns.collectDeadItems() == 0)
+  check("forever hides expansion rows",
+    w.settingsReg["VocVendor_sellLegion"] == nil
+    and w.settingsReg["VocVendor_sellMidnight"] == nil)
+  local headers = {}
+  for _, h in ipairs(w.settingsHeaders) do headers[h.header] = true end
+  check("forever hides the expansions header", headers["Expansions"] == nil)
+  check("forever keeps four headers", #w.settingsHeaders == 4)
+  check("forever thirteen checkboxes", w.settingsChecks == 13)
+  -- The same bag on Retail still sells.
+  local r = newWorld()
+  local nsr = loadAddon(r)
+  clientLoaded(r)
+  nsr.opts().sellLegion = true
+  local retailGear = gear(r, { slot = "INVTYPE_HEAD", level = 395,
+    rarity = 1, expansion = 6 })
+  local rb, rs = putBag(r, retailGear)
+  check("retail still sells checked gear",
+    nsr.isExpansionJunk(retailGear, rb, rs) == true)
 end
 
 print("ok - " .. passed .. " checks passed")
