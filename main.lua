@@ -123,6 +123,7 @@ local defaults = {
   sellConsumables = true, -- keep one stack of the strongest per category
   autoSellConsumables = false, -- ...automatically, or behind a confirm list
   useMacros = false, -- keep VV macros pointed at the strongest per quick-use slot
+  fillAmmo = true, -- show the Fill Ammo button (Forever hunters)
   protectedItems = {},    -- item IDs that never sell (/vv protect)
   newSeen = {},           -- per-feature seen stamps for New tags (/vv dismiss-new)
 }
@@ -2177,6 +2178,8 @@ function ns.onMerchantShow()
   ns.ensureMerchantSearch() -- the goods search box, built once
   ns.hookMerchantSearch() -- re-apply the dim after every refresh
   ns.applyMerchantSearch() -- names may still be arriving; the hook re-applies
+  ns.ensureAmmoButton() -- the Fill Ammo button, built once
+  ns.refreshAmmoButton() -- only shows for an ammo user with ammo to buy
   local o = ns.opts()
   if o.autoSell or o.sellConsumables or o.autoRepair then
     -- Deferred a beat: clicks inside the SHOW dispatch silently fail
@@ -2519,8 +2522,572 @@ function ns.hookMerchantSearch()
   if type(hooksecurefunc) ~= "function" then return end
   if type(MerchantFrame) ~= "table" then return end
   if type(MerchantFrame_Update) ~= "function" then return end
-  hooksecurefunc("MerchantFrame_Update", ns.applyMerchantSearch)
+  hooksecurefunc("MerchantFrame_Update", ns.onMerchantUpdated)
   ns.merchantSearchHooked = true
+end
+
+-- One post-hook serves both merchant extras: the search dim and the ammo
+-- button visibility, re-applied after every Blizzard refresh.
+function ns.onMerchantUpdated()
+  ns.applyMerchantSearch()
+  ns.refreshAmmoButton()
+end
+
+-- ======= Fill Ammo (Forever hunters) =======
+-- Hunters on the Forever client shoot ammo: arrows live in a quiver, bullets
+-- in an ammo pouch. When the player uses ammo and the vendor sells something
+-- usable, the merchant window grows a Fill Ammo button; one click buys the
+-- best usable ammo until every quiver and ammo pouch holds full stacks.
+--
+-- Sources of truth (forever branch only; Retail hides: neither ammo API is
+-- there): UnitUsesAmmo(unit) -> bool (UnitDocumentation) and
+-- C_PaperDollInfo.AmmoNeeded() -> bool (PaperDollInfoDocumentation) gate the
+-- whole feature. C_PaperDollInfo.GetInventorySlotInfo("AmmoSlot") names the
+-- equipped-ammo slot (PaperDollFrame.lua matches slotName "AmmoSlot" there),
+-- and GetInventoryItemLink reads it; the vendor pick must share its subclass
+-- (arrows vs bullets), so bullets never answer for arrows and back.
+-- C_Container.GetContainerNumFreeSlots(bag) -> (free, bagFamily) flags the
+-- restricted bags, and the equipped bag's own item class
+-- (Enum.ItemClass.Quiver = 11, ItemConstantsDocumentation) confirms a quiver
+-- or ammo pouch through CharacterBag0Slot:GetID() + bag - 1, Blizzard's own
+-- bag-button math (MainMenuBarBagButtons.lua). C_Item.GetItemFamily(itemInfo)
+-- (ItemDocumentation) declares what an item fits into, so the quiver's own
+-- family names the wanted ammo without any arrow/bullet ID or locale string:
+-- arrows land in quivers, bullets in ammo pouches (warcraft.wiki.gg Ammunition
+-- prose: arrows were ammo for bows and crossbows, bullets for guns; Blizzard
+-- never enumerated the projectile subclasses, so the code never names them).
+-- Buying follows Blizzard's own
+-- forever Mainline flow: C_MerchantFrame.GetItemInfo(index) describes the
+-- goods (MerchantItemInfo: price, stackCount, numAvailable, isPurchasable,
+-- isUsable, hasExtendedCost), GetMerchantItemLink(index) links them,
+-- GetMerchantNumItems() counts them, GetMerchantItemMaxStack(index) sizes the
+-- stacks, and BuyMerchantItem(index[, quantity]) buys them (all called by
+-- Blizzard's own MerchantFrame.lua there). Bought ammo lands through the
+-- client's own autostore, so the confirm recounts after a beat (like the
+-- deferred sale) instead of trusting the click.
+
+-- True when this character shoots ammo. Both reads are pcall-guarded and
+-- presence-gated: without them there is no ammo user, no button, no scan.
+function ns.usesAmmo()
+  if type(UnitUsesAmmo) == "function" then
+    local ok, uses = pcall(UnitUsesAmmo, "player")
+    if ok and uses == true then return true end
+  end
+  if type(C_PaperDollInfo) == "table"
+    and type(C_PaperDollInfo.AmmoNeeded) == "function" then
+    local ok, needed = pcall(C_PaperDollInfo.AmmoNeeded)
+    if ok and needed == true then return true end
+  end
+  return false
+end
+
+-- Inventory slot holding the equipped ammo, nil when the client cannot say.
+function ns.ammoSlotID()
+  if type(C_PaperDollInfo) ~= "table" then return nil end
+  if type(C_PaperDollInfo.GetInventorySlotInfo) ~= "function" then return nil end
+  local ok, id = pcall(C_PaperDollInfo.GetInventorySlotInfo, "AmmoSlot")
+  if ok and type(id) == "number" then return id end
+  return nil
+end
+
+-- The equipped ammo: link plus its class facts, or nil. Only the subclass
+-- matters downstream (arrows vs bullets); unknown keeps every type eligible.
+function ns.equippedAmmo()
+  local slot = ns.ammoSlotID()
+  if not slot then return nil end
+  if type(GetInventoryItemLink) ~= "function" then return nil end
+  local okL, link = pcall(GetInventoryItemLink, "player", slot)
+  if not okL or type(link) ~= "string" then return nil end
+  if type(C_Item) ~= "table" or type(C_Item.GetItemInfo) ~= "function" then
+    return nil
+  end
+  local r = { pcall(C_Item.GetItemInfo, link) }
+  if not r[1] or r[2] == nil then return nil end
+  return { link = link, classID = tonumber(r[13]), subClassID = tonumber(r[14]) }
+end
+
+-- Inventory slot holding equipped bag `bag` (1..NUM_BAG_SLOTS), nil when the
+-- client cannot say.
+function ns.bagInvSlot(bag)
+  if type(CharacterBag0Slot) ~= "table" then return nil end
+  if type(CharacterBag0Slot.GetID) ~= "function" then return nil end
+  local ok, base = pcall(CharacterBag0Slot.GetID, CharacterBag0Slot)
+  if ok and type(base) == "number" then return base + (bag - 1) end
+  return nil
+end
+
+-- True when this bag item is a quiver or ammo pouch (Enum.ItemClass.Quiver).
+function ns.isQuiverBagItem(link)
+  if not link then return false end
+  if type(C_Item) ~= "table" or type(C_Item.GetItemInfo) ~= "function" then
+    return false
+  end
+  if type(Enum) ~= "table" or type(Enum.ItemClass) ~= "table" then return false end
+  local quiver = Enum.ItemClass.Quiver or 11
+  local r = { pcall(C_Item.GetItemInfo, link) }
+  if not r[1] or r[2] == nil then return false end
+  return tonumber(r[13]) == quiver
+end
+
+-- True when every non-empty slot in this bag holds projectile ammo (and at
+-- least one does). The family flag alone cannot name the bag (its values
+-- are not documented), so contents decide: a soul bag full of shards is
+-- never an ammo bag, whatever its family.
+function ns.bagHoldsOnlyAmmo(bag)
+  if type(C_Container) ~= "table" then return false end
+  if type(C_Container.GetContainerNumSlots) ~= "function"
+    or type(C_Container.GetContainerItemLink) ~= "function" then
+    return false
+  end
+  if type(C_Item) ~= "table" or type(C_Item.GetItemInfo) ~= "function" then
+    return false
+  end
+  if type(Enum) ~= "table" or type(Enum.ItemClass) ~= "table" then return false end
+  local projectile = Enum.ItemClass.Projectile or 6
+  local found = false
+  local slots = C_Container.GetContainerNumSlots(bag)
+  for slot = 1, slots do
+    local link = C_Container.GetContainerItemLink(bag, slot)
+    if link then
+      local r = { pcall(C_Item.GetItemInfo, link) }
+      if not r[1] or r[2] == nil or tonumber(r[13]) ~= projectile then
+        return false
+      end
+      found = true
+    end
+  end
+  return found
+end
+
+-- True when no slot in this bag holds anything. Restricted bags read empty
+-- on clients that cannot name them, so an empty quiver still fills there.
+local function bagIsEmpty(bag)
+  if type(C_Container) ~= "table" then return false end
+  if type(C_Container.GetContainerNumSlots) ~= "function"
+    or type(C_Container.GetContainerItemLink) ~= "function" then
+    return false
+  end
+  local slots = C_Container.GetContainerNumSlots(bag)
+  for slot = 1, slots do
+    if C_Container.GetContainerItemLink(bag, slot) then return false end
+  end
+  return true
+end
+
+-- The bag's own family (the second GetContainerNumFreeSlots return), or nil
+-- when the client cannot say. Zero reads as unknown here: a family the
+-- client reports as normal proves nothing about a confirmed ammo bag.
+function ns.bagFamily(bag)
+  if type(C_Container) ~= "table" then return nil end
+  if type(C_Container.GetContainerNumFreeSlots) ~= "function" then return nil end
+  local ok, _, family = pcall(C_Container.GetContainerNumFreeSlots, bag)
+  if not ok or type(family) ~= "number" or family == 0 then return nil end
+  return family
+end
+
+-- What this ammo fits into (C_Item.GetItemFamily), or nil when the client
+-- cannot say. Links resolve first, item IDs second; either may fail, and a
+-- zero reads as unknown the same way the bag side does.
+function ns.ammoFamily(link)
+  if not link then return nil end
+  if type(C_Item) ~= "table" or type(C_Item.GetItemFamily) ~= "function" then
+    return nil
+  end
+  local ok, fam = pcall(C_Item.GetItemFamily, link)
+  if ok and type(fam) == "number" and fam ~= 0 then return fam end
+  local id = ns.itemID(link)
+  if id then
+    local okID, famID = pcall(C_Item.GetItemFamily, id)
+    if okID and type(famID) == "number" and famID ~= 0 then return famID end
+  end
+  return nil
+end
+
+-- The wanted ammo type, resolved smart from the hunter's own loadout.
+-- Every comparison downstream is numeric equality, so no arrow/bullet ID
+-- and no locale string ever enters the code:
+--   1. the equipped ammo's own subclass (what the hunter shoots right now);
+--   2. the ammo bags' own family, when every bag agrees on one nonzero
+--      family: the quiver declares what it holds, and the ammo declares
+--      what it fits into (a mixed quiver plus pouch decides nothing);
+--   3. the reserves' vote: the single distinct subclass across projectile
+--      stacks already sitting in the ammo bags.
+-- Anything unknowable stays nil, and the scan treats unknown as eligible.
+function ns.wantAmmo()
+  local want = { sub = nil, family = nil }
+  local equipped = ns.equippedAmmo()
+  if equipped and equipped.subClassID then want.sub = equipped.subClassID end
+  local bags = ns.ammoBags()
+  if #bags == 0 then return want end
+  local fam, unanimous = nil, true
+  for _, bag in ipairs(bags) do
+    local f = ns.bagFamily(bag)
+    if f == nil then unanimous = false break end
+    if fam == nil then fam = f elseif fam ~= f then unanimous = false break end
+  end
+  if unanimous then want.family = fam end
+  if not want.sub then
+    if type(C_Item) ~= "table" or type(C_Item.GetItemInfo) ~= "function" then
+      return want
+    end
+    if type(Enum) ~= "table" or type(Enum.ItemClass) ~= "table" then
+      return want
+    end
+    local projectile = Enum.ItemClass.Projectile or 6
+    local voted, single = nil, true
+    for _, bag in ipairs(bags) do
+      local slots = C_Container.GetContainerNumSlots(bag)
+      for slot = 1, slots do
+        local link = C_Container.GetContainerItemLink(bag, slot)
+        if link then
+          local r = { pcall(C_Item.GetItemInfo, link) }
+          if r[1] and r[2] ~= nil and tonumber(r[13]) == projectile then
+            local s = tonumber(r[14])
+            if voted == nil then voted = s
+            elseif voted ~= s then single = false break end
+          end
+        end
+      end
+      if not single then break end
+    end
+    if single then want.sub = voted end
+  end
+  return want
+end
+
+-- True when this bag may hold this ammo for the fill: same-link stacks
+-- always top up (the caller counts those), and empty slots count unless
+-- both families are known and disagree (a bullet pouch never fills with
+-- arrows). Unknown on either side assumes fit; the confirm recounts.
+function ns.bagTakesAmmoType(bag, link)
+  local af = ns.ammoFamily(link)
+  if af == nil then return true end
+  local bf = ns.bagFamily(bag)
+  if bf == nil then return true end
+  return bf == af
+end
+
+-- Every quiver and ammo pouch equipped right now, in bag order. Confirmed
+-- bags (the equipped item says quiver) always count; a restricted bag that
+-- only holds ammo counts too, so the feature survives a client without the
+-- bag buttons. Empty restricted bags count only when nothing confirmed: an
+-- empty quiver on a button-less client still fills, while an empty soul bag
+-- beside a real quiver never inflates the order.
+function ns.ammoBags()
+  local out = {}
+  if type(C_Container) ~= "table" then return out end
+  if type(C_Container.GetContainerNumSlots) ~= "function" then return out end
+  local empties = {}
+  for bag = 1, NUM_BAG_SLOTS do
+    local confirmed = false
+    local inv = ns.bagInvSlot(bag)
+    if inv and type(GetInventoryItemLink) == "function" then
+      local okL, bagLink = pcall(GetInventoryItemLink, "player", inv)
+      if okL then confirmed = ns.isQuiverBagItem(bagLink) end
+    end
+    if confirmed then
+      out[#out + 1] = bag
+    else
+      local restricted = nil
+      if type(C_Container.GetContainerNumFreeSlots) == "function" then
+        local ok, _, family = pcall(C_Container.GetContainerNumFreeSlots, bag)
+        if ok then restricted = family ~= nil and family ~= 0 end
+      end
+      if restricted then
+        if ns.bagHoldsOnlyAmmo(bag) then
+          out[#out + 1] = bag
+        elseif bagIsEmpty(bag) then
+          empties[#empties + 1] = bag
+        end
+      end
+    end
+  end
+  if #out == 0 then out = empties end
+  return out
+end
+
+-- Every usable projectile this vendor sells, best first. Best means the
+-- highest required level the player meets (stronger ammo needs higher
+-- level); ties break by item level, then the lower item ID. A vendor pick
+-- must fit the wanted type (ns.wantAmmo), so bullets never answer for
+-- arrows. Extended-cost goods never qualify (gold only), and an empty
+-- shelf (numAvailable 0) never qualifies either.
+function ns.scanMerchantAmmo()
+  local out = {}
+  if not ns.usesAmmo() then return out end
+  if type(C_MerchantFrame) ~= "table"
+    or type(C_MerchantFrame.GetItemInfo) ~= "function" then
+    return out
+  end
+  if type(GetMerchantNumItems) ~= "function"
+    or type(GetMerchantItemLink) ~= "function" then
+    return out
+  end
+  if type(C_Item) ~= "table" or type(C_Item.GetItemInfo) ~= "function" then
+    return out
+  end
+  if type(Enum) ~= "table" or type(Enum.ItemClass) ~= "table" then return out end
+  local projectile = Enum.ItemClass.Projectile or 6
+  local okN, num = pcall(GetMerchantNumItems)
+  if not okN or type(num) ~= "number" or num <= 0 then return out end
+  local want = ns.wantAmmo()
+  local level = ns.playerLevel()
+  for index = 1, num do
+    local okI, info = pcall(C_MerchantFrame.GetItemInfo, index)
+    if okI and type(info) == "table" and type(info.name) == "string" then
+      if not info.hasExtendedCost and info.numAvailable ~= 0
+        and info.isPurchasable ~= false and info.isUsable ~= false then
+        local okL, link = pcall(GetMerchantItemLink, index)
+        if okL and type(link) == "string" then
+          local r = { pcall(C_Item.GetItemInfo, link) }
+          if r[1] and r[2] ~= nil and tonumber(r[13]) == projectile then
+            local minLevel = tonumber(r[6]) -- 5th return
+            local sub = tonumber(r[14]) -- 13th return
+            -- The wanted type rules arrows vs bullets: a known subclass
+            -- must match exactly, while a known family only excludes what
+            -- provably fits elsewhere (unknown on either side stays
+            -- eligible, and the bought link names the pick in chat).
+            local wrongSub = want.sub ~= nil and sub ~= want.sub
+            local wrongFam = false
+            if not wrongSub and want.sub == nil and want.family ~= nil then
+              local af = ns.ammoFamily(link)
+              wrongFam = af ~= nil and af ~= 0 and af ~= want.family
+            end
+            if (minLevel == nil or level == nil or minLevel <= level)
+              and not wrongSub and not wrongFam then
+              local maxStack = nil
+              if type(GetMerchantItemMaxStack) == "function" then
+                local okM, m = pcall(GetMerchantItemMaxStack, index)
+                if okM and type(m) == "number" and m > 0 then maxStack = m end
+              end
+              maxStack = maxStack or tonumber(r[9]) or 1 -- 8th return
+              if maxStack < 1 then maxStack = 1 end
+              local perStack = tonumber(info.stackCount) or 0
+              if perStack <= 0 then perStack = maxStack end
+              out[#out + 1] = { index = index, link = link,
+                itemID = ns.itemID(link),
+                minLevel = minLevel or 0, ilvl = tonumber(r[5]) or 0,
+                price = tonumber(info.price) or 0,
+                stackCount = perStack,
+                numAvailable = tonumber(info.numAvailable),
+                maxStack = maxStack }
+            end
+          end
+        end
+      end
+    end
+  end
+  table.sort(out, function(a, b)
+    if a.minLevel ~= b.minLevel then return a.minLevel > b.minLevel end
+    if a.ilvl ~= b.ilvl then return a.ilvl > b.ilvl end
+    return (a.itemID or 0) < (b.itemID or 0)
+  end)
+  return out
+end
+
+-- Free units for this ammo across these bags: empty slots take a full
+-- stack when the bag may hold the type (ns.bagTakesAmmoType, so a bullet
+-- pouch's empties never inflate an arrow order), partial stacks of the
+-- same link top up, anything else holds.
+function ns.ammoSpace(bags, link, maxStack)
+  local free = 0
+  if type(C_Container) ~= "table" then return 0 end
+  if type(C_Container.GetContainerNumSlots) ~= "function"
+    or type(C_Container.GetContainerItemLink) ~= "function" then
+    return 0
+  end
+  for _, bag in ipairs(bags or {}) do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      local now = C_Container.GetContainerItemLink(bag, slot)
+      if not now then
+        if ns.bagTakesAmmoType(bag, link) then free = free + maxStack end
+      elseif now == link then
+        free = free + math.max(0, maxStack - ns.slotCount(bag, slot))
+      end
+    end
+  end
+  return free
+end
+
+-- Units of this link across every bag, for the Fill Ammo confirm.
+function ns.countAmmo(link)
+  local n = 0
+  if type(C_Container) ~= "table" then return 0 end
+  if type(C_Container.GetContainerNumSlots) ~= "function"
+    or type(C_Container.GetContainerItemLink) ~= "function" then
+    return 0
+  end
+  for bag = 0, NUM_BAG_SLOTS do
+    local slots = C_Container.GetContainerNumSlots(bag)
+    for slot = 1, slots do
+      if C_Container.GetContainerItemLink(bag, slot) == link then
+        n = n + ns.slotCount(bag, slot)
+      end
+    end
+  end
+  return n
+end
+
+-- "14x link" for whole stacks, raw units otherwise. math.floor keeps the
+-- count whole on Lua 5.3+, where / always divides to float.
+function ns.ammoBoughtLine(units, maxStack, link)
+  if units % maxStack == 0 then
+    return math.floor(units / maxStack) .. "x " .. link
+  end
+  return units .. "x " .. link
+end
+
+-- The Fill Ammo click (and /vv ammo): buy the vendor's best usable ammo
+-- until the quivers and pouches hold full stacks. Money and the vendor's
+-- own stock cap the order; the confirm recounts after a beat, because
+-- bought ammo lands through the client's autostore, not the click.
+function ns.fillAmmo()
+  if not ns.merchantOpen() then
+    ns.say("open a vendor first")
+    return
+  end
+  if not ns.usesAmmo() then
+    ns.say("this character uses no ammo")
+    return
+  end
+  local goods = ns.scanMerchantAmmo()
+  local best = goods[1]
+  if not best then
+    ns.say("no usable ammo from this vendor")
+    return
+  end
+  local bags = ns.ammoBags()
+  if #bags == 0 then
+    ns.say("equip a quiver or ammo pouch first")
+    return
+  end
+  local need = ns.ammoSpace(bags, best.link, best.maxStack)
+  if need <= 0 then
+    ns.say("no room for " .. best.link .. " (quiver full)")
+    return
+  end
+  -- The vendor's own stock caps the order: numAvailable counts the shelf,
+  -- unlimited shelves read -1.
+  if (best.numAvailable or -1) > 0 then
+    need = math.min(need, best.numAvailable * best.stackCount)
+  end
+  -- Gold caps it too: price buys stackCount units.
+  if best.price > 0 and type(GetMoney) == "function" then
+    local afford = math.floor(GetMoney() / (best.price / best.stackCount))
+    if afford <= 0 then
+      ns.say("not enough gold for " .. best.link)
+      return
+    end
+    need = math.min(need, afford)
+  end
+  if type(BuyMerchantItem) ~= "function" then
+    ns.say("can't buy here")
+    return
+  end
+  local before = ns.countAmmo(best.link)
+  local bought, remaining = 0, need
+  while remaining > 0 do
+    local qty = math.min(best.maxStack, remaining)
+    local ok
+    if qty == best.stackCount then
+      ok = pcall(BuyMerchantItem, best.index)
+    else
+      ok = pcall(BuyMerchantItem, best.index, qty)
+    end
+    if not ok then break end
+    bought, remaining = bought + qty, remaining - qty
+  end
+  if bought <= 0 then
+    ns.say("couldn't buy " .. best.link)
+    return
+  end
+  ns.play("sell") -- the purchase confirms like any other sale
+  local planned = ns.ammoBoughtLine(bought, best.maxStack, best.link)
+  local function confirm()
+    local landed = ns.countAmmo(best.link) - before
+    if landed <= 0 then
+      ns.say("bought " .. planned .. " (check the bags)")
+    elseif landed < bought then
+      ns.say("filled ammo: " .. ns.ammoBoughtLine(landed, best.maxStack, best.link)
+        .. " (the shelf or the bags ran short)")
+    else
+      ns.say("filled ammo: " .. planned)
+    end
+  end
+  if type(C_Timer) == "table" and type(C_Timer.After) == "function" then
+    pcall(C_Timer.After, 1, confirm)
+  else
+    ns.say("bought " .. planned)
+  end
+end
+
+-- The merchant window button, built once on first visit. It sits left of
+-- the search box, in the same title band, and only shows for its moment.
+ns.ammoButton = nil
+function ns.ensureAmmoButton()
+  if ns.ammoButton then return ns.ammoButton end
+  if type(MerchantFrame) ~= "table" then return nil end
+  if type(CreateFrame) ~= "function" then return nil end
+  if not ns.usesAmmo() then return nil end -- no ammo user, no button
+  local ok, btn = pcall(CreateFrame, "Button", "VocVendorAmmoButton",
+    MerchantFrame, "UIPanelButtonTemplate")
+  if not ok or btn == nil then return nil end
+  btn:SetSize(96, 22)
+  local box = ns.merchantSearchBox
+  if type(box) == "table" then
+    btn:SetPoint("RIGHT", box, "LEFT", -6, 0)
+  else
+    btn:SetPoint("TOPRIGHT", MerchantFrame, "TOPRIGHT", -190, -30)
+  end
+  if type(btn.SetText) == "function" then btn:SetText("Fill Ammo") end
+  btn:SetScript("OnClick", function() ns.fillAmmo() end)
+  if type(btn.HookScript) == "function" then
+    btn:HookScript("OnEnter", function(self)
+      if type(IsMouseButtonDown) == "function" and IsMouseButtonDown() then return end
+      if type(GameTooltip) ~= "table" then return end
+      GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+      GameTooltip:SetText("Fill Ammo",
+        COLORS.gold[1], COLORS.gold[2], COLORS.gold[3])
+      -- One line, naming the pick when the shelf names one.
+      local line = "Buy the best ammo here until the quiver or ammo pouch holds full stacks"
+      local goods = ns.scanMerchantAmmo()
+      if goods[1] then line = "Fill with " .. goods[1].link end
+      GameTooltip:AddLine(line,
+        COLORS.text[1], COLORS.text[2], COLORS.text[3])
+      GameTooltip:Show()
+    end)
+    btn:HookScript("OnLeave", function()
+      if type(GameTooltip) == "table" then GameTooltip:Hide() end
+    end)
+  end
+  btn:Hide() -- refreshAmmoButton owns visibility from here
+  ns.ammoButton = btn
+  return btn
+end
+
+-- Shows the button only for its moment: the setting on, an ammo user, an
+-- open merchant on the goods tab, and a vendor whose best usable ammo
+-- still has room. A full quiver hides the button; the click then has
+-- nothing left to explain.
+function ns.refreshAmmoButton()
+  local btn = ns.ammoButton
+  if not btn then return end
+  local show = ns.opts().fillAmmo
+    and ns.usesAmmo()
+    and ns.merchantOpen()
+    and type(MerchantFrame) == "table"
+    and MerchantFrame.selectedTab == 1
+  if show then
+    local goods = ns.scanMerchantAmmo()
+    local best = goods[1]
+    show = best ~= nil
+      and ns.ammoSpace(ns.ammoBags(), best.link, best.maxStack) > 0
+  end
+  if type(btn.IsShown) == "function" and type(btn.Show) == "function"
+    and type(btn.Hide) == "function" then
+    if show then btn:Show() else btn:Hide() end
+  end
 end
 
 -- Delete confirm: one dead item per dialog, named by link. The Accept
@@ -3756,6 +4323,9 @@ function ns.ensureSettings()
     "Sell bag items the vendor buys for more than the auction house nets after the 5% cut, using Auctionator, TradeSkillMaster, or Oribos Exchange data. Items without price data keep; BoE needs Also sell Bind on Equip, Warbound needs Also sell Warbound, and kept disenchantables still divert.")
   check("keepDisenchantable", "Keep disenchantable gear",
     "Enchanters only: keep gear you could disenchant out of junk sales. Off sells it with junk like any other old gear.")
+  check("fillAmmo", "Show Fill Ammo button",
+    "Hunters on the Forever client: show a Fill Ammo button on vendors that sell usable arrows or bullets. One click buys the best usable ammo until the quiver or ammo pouch holds full stacks.",
+    ns.refreshAmmoButton)
   header("Using",
     "Use macros point at the strongest consumable in each quick-use slot.")
   check("useMacros", "Maintain use macros",
@@ -3871,6 +4441,7 @@ ns.HELP = {
   "/vv destroy       delete dead expansion items (confirms each)",
   "/vv consume       sell losing consumables",
   "/vv use           use best consumables (refresh macros)",
+  "/vv ammo          fill quiver or ammo pouch with the best ammo here",
   "/vv protect       open the keeps list (names, shift-click, commas ok)",
   "/vv diag          show consumable ranks",
   "/vv why           explain each gear verdict",
@@ -3939,6 +4510,8 @@ SlashCmdList.VOCVENDOR = function(msg)
     local maintained = ns.opts().useMacros
     if maintained then ns.updateUseMacros() end
     ns.reportUsePicks(ns.usePicks(), maintained)
+  elseif msg == "ammo" then
+    ns.fillAmmo()
   elseif msg == "protect" then
     ns.openKeeps()
   elseif msg:sub(1, 8) == "protect " then
@@ -3964,6 +4537,7 @@ ns.frame:RegisterEvent("ADDON_LOADED")
 ns.frame:RegisterEvent("PLAYER_LOGIN")
 ns.frame:RegisterEvent("MERCHANT_SHOW")
 ns.frame:RegisterEvent("MERCHANT_CLOSED")
+ns.frame:RegisterEvent("MERCHANT_UPDATE")
 ns.frame:RegisterEvent("BAG_UPDATE")
 ns.frame:RegisterEvent("BAG_UPDATE_DELAYED")
 ns.frame:RegisterEvent("PLAYER_REGEN_ENABLED")
@@ -3994,9 +4568,12 @@ ns.frame:SetScript("OnEvent", function(_, event, arg1, arg2)
     ns.onMerchantShow()
   elseif event == "MERCHANT_CLOSED" then
     ns.onMerchantClosed()
+  elseif event == "MERCHANT_UPDATE" then
+    ns.refreshAmmoButton() -- stock changed: the button tracks the shelf
   elseif event == "BAG_UPDATE" then
     ns.refreshDEWindow() -- the disenchant list tracks the bags live
     ns.refreshDeadWindow() -- and so does the delete list
+    ns.refreshAmmoButton() -- bought ammo lands here: hide when full
   elseif event == "BAG_UPDATE_DELAYED" then
     ns.updateUseMacros() -- winning stacks changed: re-point the macros
   elseif event == "PLAYER_REGEN_ENABLED" then

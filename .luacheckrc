@@ -41,6 +41,11 @@ read_globals = {
   "MerchantFrame", "MerchantSellAllJunkButton", -- native Sell Junk hook (MerchantFrame.xml, live + forever)
   "GetMerchantItemInfo", "MERCHANT_ITEMS_PER_PAGE", -- merchant search (MerchantFrame.lua, Vanilla + Mainline)
   "MerchantFrame_Update", -- refresh post-hook for the merchant search
+  "GetMerchantNumItems", "GetMerchantItemLink", "GetMerchantItemMaxStack", -- Fill Ammo buys (forever Mainline MerchantFrame.lua)
+  "BuyMerchantItem", -- Fill Ammo purchase (forever Mainline MerchantFrame.lua)
+  "C_PaperDollInfo", -- AmmoNeeded + AmmoSlot (forever PaperDollInfoDocumentation)
+  "UnitUsesAmmo", -- Fill Ammo gate (forever UnitDocumentation)
+  "CharacterBag0Slot", -- Fill Ammo bag math (forever MainMenuBarBagButtons.lua)
   "MacroFrame", -- Blizzard_MacroUI owns it on both branches; the OnHide hook and IsShown are presence-gated
   "GetMacroInfo", "GetNumMacros", "CreateMacro", "EditMacro", -- bare macro writes, called by Blizzard_MacroUI on both branches
   "UnitLevel", "UnitPowerMax", -- winner usability + mana gates (UnitDocumentation, both branches)

@@ -28,7 +28,9 @@ click an item to disenchant it. The native Sell
 Junk button keeps working and gains your definition: with old gear in
 it, the click lists the items and asks before selling. The merchant window
 grows a search box that dims goods that do not match as you type, like the
-bag search. The addon
+bag search. On the Forever client, hunters also get a Fill Ammo button
+on vendors that sell usable arrows or bullets: one click buys the best
+usable ammo until the quiver or ammo pouch holds full stacks. The addon
 compartment on the minimap opens the settings, or the disenchant list
 while kept gear waits.
 
@@ -40,6 +42,7 @@ while kept gear waits.
 /vv destroy       delete dead expansion items (Retail, confirms each)
 /vv consume       sell losing consumables
 /vv use           use best consumables (refresh macros)
+/vv ammo          fill quiver or ammo pouch with the best ammo here
 /vv protect       open the keeps list (names, shift-click, commas ok)
 /vv diag          show consumable ranks
 /vv why           explain each gear verdict
@@ -66,6 +69,7 @@ Settings > AddOns > VocVendor, or `/vv config`:
 - Sell losing consumables (default on: keep one stack of the strongest food, flask, potion and more; the rest sells with junk. Unrecognized and special items never sell)
 - Auto-sell losing consumables (default off: sell them automatically on every vendor visit. Off shows a confirm list first)
 - Maintain use macros (default off: keep VV Food, VV Drink, VV Health, VV Mana and VV Bandage pointed at the strongest consumable in each slot. They update when your bags change)
+- Show Fill Ammo button (default on: hunters on the Forever client see a Fill Ammo button on vendors that sell usable arrows or bullets)
 - Vendor <expansion> items (Retail only; default off, all twelve from Classic to Midnight): check an expansion to sell everything the vendor buys from it, whatever the type. All keep gates still hold; dead leftovers the vendor refuses collect for confirmed delete instead. Hidden on the Forever client, which has no expansions
 
 Every change applies at once. Child options disable while their parent

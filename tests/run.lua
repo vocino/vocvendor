@@ -43,7 +43,28 @@ local function loadAddon(world)
     ItemBind = { OnEquip = 2, OnAcquire = 1 },
   }
   g.C_Container = {
-    GetContainerNumSlots = function(bag) return #(world.bags[bag] or {}) end,
+    GetContainerNumSlots = function(bag)
+      if world.bagSizes and world.bagSizes[bag] then
+        return world.bagSizes[bag]
+      end
+      return #(world.bags[bag] or {})
+    end,
+    -- world.bagFamilies[bag] is the restricted-bag family (nonzero marks
+    -- quivers, ammo pouches, soul bags...); free counts truly empty slots.
+    GetContainerNumFreeSlots = function(bag)
+      local slots = (world.bagSizes and world.bagSizes[bag])
+        or #(world.bags[bag] or {})
+      local free = 0
+      for slot = 1, slots do
+        if world.removed[bag .. ":" .. slot] then
+          free = free + 1
+        else
+          local b = world.bags[bag]
+          if not (b and b[slot]) then free = free + 1 end
+        end
+      end
+      return free, world.bagFamilies and world.bagFamilies[bag] or 0
+    end,
     GetContainerItemLink = function(bag, slot)
       if world.removed[bag .. ":" .. slot] then return nil end
       local b = world.bags[bag]
@@ -166,9 +187,11 @@ local function loadAddon(world)
       world.junkSold = true
       world.money = world.money + world.junkValue
     end,
-    -- world.merchantGoods[index] drives the C_ struct; an empty slot
-    -- answers without a name.
+    -- world.merchantAmmo[index] is the full MerchantItemInfo struct plus
+    -- .link for a Fill Ammo good; other slots answer with the bare
+    -- merchantGoods name, or nothing when empty.
     GetItemInfo = function(index)
+      if world.merchantAmmo[index] then return world.merchantAmmo[index] end
       local name = world.merchantGoods[index]
       if name == nil then return {} end
       return { name = name }
@@ -253,6 +276,92 @@ local function loadAddon(world)
   g.UnitStat = function(_, i) return (world.unitStats or {})[i] end
   g.UnitLevel = function() return world.playerLevel end
   g.UnitPowerMax = function() return world.playerMana end
+  -- Fill Ammo gate (forever): world.usesAmmo / world.ammoNeeded drive the
+  -- presence-gated reads; both absent means no ammo user.
+  -- world.itemFamilies[link-or-ID] is the C_Item.GetItemFamily answer
+  -- (the bag family the item fits into); missing means unknown.
+  g.C_Item.GetItemFamily = function(item)
+    return (world.itemFamilies or {})[item]
+  end
+  g.UnitUsesAmmo = function() return world.usesAmmo end
+  g.C_PaperDollInfo = {
+    AmmoNeeded = function() return world.ammoNeeded end,
+    GetInventorySlotInfo = function() return world.ammoSlotID end,
+  }
+  -- Blizzard's own bag-button base ID (MainMenuBarBagButtons.lua); the
+  -- addon derives bag inventory slots from it.
+  g.CharacterBag0Slot = { GetID = function() return 20 end }
+  -- Fill Ammo merchant reads (forever Mainline MerchantFrame.lua):
+  -- world.merchantAmmo[index] = { name, price, stackCount, numAvailable,
+  -- isPurchasable, isUsable, hasExtendedCost, link };
+  -- world.merchantNum counts the shelf. Purchases land in bag 1, topping
+  -- up partials first like the client's autostore.
+  g.GetMerchantNumItems = function()
+    return world.merchantNum or #(world.merchantGoods or {})
+  end
+  g.GetMerchantItemLink = function(index)
+    local good = world.merchantAmmo[index]
+    return good and good.link or nil
+  end
+  g.GetMerchantItemMaxStack = function(index)
+    if world.merchantMaxStack[index] then
+      return world.merchantMaxStack[index]
+    end
+    local good = world.merchantAmmo[index]
+    if good and good.link then return world.maxStacks[good.link] end
+    return nil
+  end
+  g.BuyMerchantItem = function(index, qty)
+    local good = world.merchantAmmo[index]
+    if world.buyFails then error("buy failed") end
+    local perStack = (good and good.stackCount) or 200
+    qty = qty or perStack
+    world.buys[#world.buys + 1] = { index = index, qty = qty }
+    local link = good and good.link
+    if not link then return end
+    if good and good.price then
+      world.money = world.money - good.price * qty / perStack
+    end
+    local maxStack = world.maxStacks[link] or 200
+    local order = { 1, 2, 3, 4, 0 } -- quivers first, backpack last
+    local remaining = qty
+    for _, bag in ipairs(order) do
+      if remaining <= 0 then break end
+      local size = (world.bagSizes and world.bagSizes[bag])
+        or #(world.bags[bag] or {})
+      world.bags[bag] = world.bags[bag] or {}
+      for slot = 1, size do
+        if remaining <= 0 then break end
+        local key = bag .. ":" .. slot
+        local cur = (not world.removed[key]) and world.bags[bag][slot] or nil
+        if cur == link then
+          local room = maxStack - (world.stackCounts[key] or 1)
+          if room > 0 then
+            local add = math.min(room, remaining)
+            world.stackCounts[key] = (world.stackCounts[key] or 1) + add
+            remaining = remaining - add
+          end
+        end
+      end
+    end
+    for _, bag in ipairs(order) do
+      if remaining <= 0 then break end
+      local size = (world.bagSizes and world.bagSizes[bag])
+        or #(world.bags[bag] or {})
+      for slot = 1, size do
+        if remaining <= 0 then break end
+        local key = bag .. ":" .. slot
+        local cur = (not world.removed[key]) and world.bags[bag][slot] or nil
+        if cur == nil then
+          local add = math.min(maxStack, remaining)
+          world.bags[bag][slot] = link
+          world.removed[key] = nil
+          world.stackCounts[key] = add
+          remaining = remaining - add
+        end
+      end
+    end
+  end
   -- Macro globals (verified against Blizzard's own MacroUI on both
   -- branches): world.macros[name] = { index, icon, body, perChar }.
   -- world.noMacros removes them all, testing the presence gate.
@@ -549,6 +658,10 @@ local function newWorld()
     artifactPower = {}, completedQuestIDs = {}, questTitles = {},
     tipLines = {}, tipLink = nil, cursor = nil,
     merchantGoods = {},
+    merchantAmmo = {}, merchantMaxStack = {}, merchantNum = nil,
+    buys = {}, buyFails = false, bagSizes = {}, bagFamilies = {},
+    itemFamilies = {},
+    usesAmmo = nil, ammoNeeded = nil, ammoSlotID = nil,
     loadedAddons = {},
     combat = false, deSpellName = "Disenchant", noSecure = false,
   }
@@ -622,6 +735,78 @@ local function putStack(w, link, n)
   w.bags[0][#w.bags[0] + 1] = link
   w.stackCounts["0:" .. #w.bags[0]] = n or 1
   return 0, #w.bags[0]
+end
+
+-- Ammo factory: a projectile link with the fields the Fill Ammo scan
+-- reads. sub 2 is arrows, sub 3 bullets.
+local ammoSeq = 0
+local function ammo(w, o)
+  o = o or {}
+  ammoSeq = ammoSeq + 1
+  local link = "item:ammo" .. ammoSeq
+  w.itemIDs[link] = 7000 + ammoSeq
+  w.classIDs[link] = 6 -- Projectile
+  w.subclassIDs[link] = o.sub or 2
+  w.minLevels[link] = o.minLevel or 1
+  w.levels[link] = o.ilvl or o.minLevel or 1
+  w.prices[link] = 0
+  w.maxStacks[link] = o.max or 200
+  w.rarities[link] = 1
+  w.expansions[link] = 0
+  return link
+end
+
+-- Quiver factory: equips a quiver/ammo pouch in bag slot `bag` with `size`
+-- slots and marks its restricted family.
+local quiverSeq = 0
+local function quiver(w, bag, size, o)
+  o = o or {}
+  quiverSeq = quiverSeq + 1
+  local link = "item:quiver" .. quiverSeq
+  w.itemIDs[link] = 8000 + quiverSeq
+  w.classIDs[link] = 11 -- Quiver
+  w.subclassIDs[link] = o.sub or 2
+  w.equipped[20 + bag - 1] = link -- CharacterBag0Slot math
+  w.bagSizes[bag] = size
+  w.bagFamilies[bag] = o.family or 1
+  w.bags[bag] = {}
+  return link
+end
+
+-- Put n units of link in an explicit quiver slot.
+local function putAmmo(w, bag, slot, link, n)
+  w.bags[bag] = w.bags[bag] or {}
+  w.bags[bag][slot] = link
+  w.stackCounts[bag .. ":" .. slot] = n
+end
+
+-- Stock the vendor shelf: link at merchant index with a gold price per
+-- stackCount units, unlimited (-1) unless numAvailable says otherwise.
+local function sellAmmo(w, index, link, o)
+  o = o or {}
+  w.merchantNum = math.max(w.merchantNum or 0, index)
+  w.merchantAmmo[index] = {
+    name = o.name or ("Ammo" .. index),
+    price = o.price or 1000,
+    stackCount = o.stackCount or w.maxStacks[link] or 200,
+    numAvailable = (o.numAvailable ~= nil) and o.numAvailable or -1,
+    isPurchasable = (o.isPurchasable ~= nil) and o.isPurchasable or true,
+    isUsable = (o.isUsable ~= nil) and o.isUsable or true,
+    hasExtendedCost = o.hasExtendedCost or false,
+    link = link,
+  }
+  if o.maxStack then w.merchantMaxStack[index] = o.maxStack end
+end
+
+-- Hunter world: an ammo user with a 14-slot quiver and an empty shelf.
+local function hunterWorld()
+  local w = newWorld()
+  w.usesAmmo = true
+  w.ammoNeeded = true
+  w.ammoSlotID = 0
+  w.withTimer = true -- deferred Fill Ammo confirms run through world.deferred
+  quiver(w, 1, 14)
+  return w
 end
 
 -- 1. Defaults fill in on a fresh SavedVariables table.
@@ -1127,7 +1312,9 @@ do
   check("autoSell setting", w.env.Settings and w.settingsReg["VocVendor_autoSell"] ~= nil)
   check("gap slider", w.settingsSliders == 1)
   check("gap default", w.settingsReg["VocVendor_oldGearIlvlGap"].default == 30)
-  check("checkboxes", w.settingsChecks == 25)
+  check("checkboxes", w.settingsChecks == 26)
+  check("fill ammo setting", w.settingsReg["VocVendor_fillAmmo"] ~= nil)
+  check("fill ammo default on", w.settingsReg["VocVendor_fillAmmo"].default == true)
   check("use macros setting", w.settingsReg["VocVendor_useMacros"] ~= nil)
   check("use macros default off", w.settingsReg["VocVendor_useMacros"].default == false)
   check("legion setting", w.settingsReg["VocVendor_sellLegion"] ~= nil)
@@ -3121,12 +3308,13 @@ do
   check("use macros stay off", o.useMacros == false)
   local announced = {}
   for _, line in ipairs(w.printed) do announced[line] = true end
-  check("announced once per setting", #w.printed == 6
+  check("announced once per setting", #w.printed == 7
     and announced["|cff66ccffVocVendor|r: new setting on: autoRepair"]
     and announced["|cff66ccffVocVendor|r: new setting on: guildRepair"]
     and announced["|cff66ccffVocVendor|r: new setting on: announce"]
     and announced["|cff66ccffVocVendor|r: new setting on: keepDisenchantable"]
     and announced["|cff66ccffVocVendor|r: new setting on: compareAuction"]
+    and announced["|cff66ccffVocVendor|r: new setting on: fillAmmo"]
     and announced["|cff66ccffVocVendor|r: new setting on: sellConsumables"])
   check("denied setting untagged", ns.db.newSeen.junkOldGear == nil)
   check("fresh tag visible", ns.isNew("keepDisenchantable", 2000000) == true)
@@ -4424,7 +4612,7 @@ do
   for _, h in ipairs(w.settingsHeaders) do headers[h.header] = true end
   check("forever hides the expansions header", headers["Expansions"] == nil)
   check("forever keeps four headers", #w.settingsHeaders == 4)
-  check("forever thirteen checkboxes", w.settingsChecks == 13)
+  check("forever fourteen checkboxes", w.settingsChecks == 14)
   -- The same bag on Retail still sells.
   local r = newWorld()
   local nsr = loadAddon(r)
@@ -4435,6 +4623,360 @@ do
   local rb, rs = putBag(r, retailGear)
   check("retail still sells checked gear",
     nsr.isExpansionJunk(retailGear, rb, rs) == true)
+end
+
+-- 111. Fill Ammo hides without an ammo user and explains itself on slash.
+do
+  local w = newWorld() -- neither UnitUsesAmmo nor AmmoNeeded answers
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.env.MerchantFrame.selectedTab = 1
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("no button shown without ammo user", ns.ammoButton == nil
+    or ns.ammoButton.shown == false)
+  check("scan empty without ammo user", #ns.scanMerchantAmmo() == 0)
+  w.env.SlashCmdList.VOCVENDOR("ammo")
+  check("slash ammo without ammo user",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: this character uses no ammo")
+  check("no purchases without ammo user", #w.buys == 0)
+end
+
+-- 112. The goal scenario: level 41 hunter, empty 14-slot quiver, vendor
+-- sells Jagged Arrow (req 40) - one click leaves 14 full stacks.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local jagged = ammo(w, { minLevel = 40 })
+  sellAmmo(w, 1, jagged, { name = "Jagged Arrow", price = 1000 })
+  w.env.MerchantFrame.selectedTab = 1
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("ammo button shows", ns.ammoButton ~= nil and ns.ammoButton.shown == true)
+  check("button names Fill Ammo", ns.ammoButton:GetText() == "Fill Ammo")
+  ns.fillAmmo()
+  check("fourteen stacks bought", #w.buys == 14)
+  local units = 0
+  for _, b in ipairs(w.buys) do units = units + b.qty end
+  check("2800 units bought", units == 2800)
+  check("paid per stack", w.money == 100000 - 14 * 1000)
+  w.deferred[#w.deferred]() -- the confirm recounts after the beat
+  check("confirm names fourteen stacks",
+    w.printed[#w.printed] == "|cff66ccffVocVendor|r: filled ammo: 14x " .. jagged)
+end
+
+-- 113. Best means highest usable required level; too-high ammo never sells.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local rough = ammo(w, { minLevel = 1 })
+  local jagged = ammo(w, { minLevel = 40 })
+  local thorium = ammo(w, { minLevel = 50 })
+  sellAmmo(w, 1, rough, { name = "Rough Arrow", price = 100 })
+  sellAmmo(w, 2, jagged, { name = "Jagged Arrow", price = 1000 })
+  sellAmmo(w, 3, thorium, { name = "Thorium Arrow", price = 5000 })
+  local goods = ns.scanMerchantAmmo()
+  check("too-high ammo skipped", #goods == 2 and goods[1].link == jagged)
+  ns.fillAmmo()
+  check("best ammo bought", #w.buys == 14 and w.buys[1].index == 2)
+  w.deferred[#w.deferred]()
+  check("confirm names the best",
+    w.printed[#w.printed]:find("filled ammo: 14x " .. jagged, 1, true) ~= nil)
+end
+
+-- 114. Ammo type follows the equipped ammo: bullets never answer for arrows.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local bullets = ammo(w, { sub = 3, minLevel = 40 })
+  w.equipped[0] = bullets -- gun loaded with bullets
+  local arrows = ammo(w, { sub = 2, minLevel = 40 })
+  sellAmmo(w, 1, arrows, { name = "Jagged Arrow", price = 1000 })
+  check("wrong-type shelf skipped", #ns.scanMerchantAmmo() == 0)
+  ns.fillAmmo()
+  check("wrong type buys nothing",
+    #w.buys == 0
+    and w.printed[#w.printed] == "|cff66ccffVocVendor|r: no usable ammo from this vendor")
+  sellAmmo(w, 2, bullets, { name = "Jagged Bullet", price = 1000 })
+  check("matching type found", #ns.scanMerchantAmmo() == 1)
+end
+
+-- 115. Partial fills top up: ten full stacks plus four empty slots buy four.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local jagged = ammo(w, { minLevel = 40 })
+  for slot = 1, 10 do putAmmo(w, 1, slot, jagged, 200) end
+  sellAmmo(w, 1, jagged, { name = "Jagged Arrow", price = 1000 })
+  ns.fillAmmo()
+  check("only empty slots bought", #w.buys == 4)
+  w.deferred[#w.deferred]()
+  check("partial confirm counts four",
+    w.printed[#w.printed]:find("filled ammo: 4x " .. jagged, 1, true) ~= nil)
+end
+
+-- 116. A partial stack tops up with one exact-quantity buy.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local jagged = ammo(w, { minLevel = 40 })
+  for slot = 1, 13 do putAmmo(w, 1, slot, jagged, 200) end
+  putAmmo(w, 1, 14, jagged, 50)
+  sellAmmo(w, 1, jagged, { name = "Jagged Arrow", price = 1000 })
+  ns.fillAmmo()
+  check("one top-up buy", #w.buys == 1 and w.buys[1].qty == 150)
+  w.deferred[#w.deferred]()
+  check("top-up confirm counts units",
+    w.printed[#w.printed]:find("filled ammo: 150x " .. jagged, 1, true) ~= nil)
+end
+
+-- 117. A full quiver buys nothing; a missing quiver names the fix.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local jagged = ammo(w, { minLevel = 40 })
+  for slot = 1, 14 do putAmmo(w, 1, slot, jagged, 200) end
+  sellAmmo(w, 1, jagged, { name = "Jagged Arrow", price = 1000 })
+  ns.fillAmmo()
+  check("full quiver buys nothing",
+    #w.buys == 0
+    and w.printed[#w.printed]:find("no room for", 1, true) ~= nil)
+  local bare = newWorld()
+  bare.usesAmmo = true
+  local nsb = loadAddon(bare)
+  clientLoaded(bare)
+  bare.playerLevel = 41
+  local plain = ammo(bare, { minLevel = 40 })
+  sellAmmo(bare, 1, plain, { name = "Jagged Arrow", price = 1000 })
+  nsb.fillAmmo()
+  check("missing quiver names the fix",
+    #bare.buys == 0
+    and bare.printed[#bare.printed]:find("equip a quiver or ammo pouch first", 1, true) ~= nil)
+end
+
+-- 118. Gold caps the order; an empty purse explains itself.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  w.money = 2500
+  local jagged = ammo(w, { minLevel = 40 })
+  sellAmmo(w, 1, jagged, { name = "Jagged Arrow", price = 1000 })
+  ns.fillAmmo()
+  local units = 0
+  for _, b in ipairs(w.buys) do units = units + b.qty end
+  check("gold caps units", units == 500)
+  w.deferred[#w.deferred]()
+  check("capped confirm counts units",
+    w.printed[#w.printed]:find("filled ammo: 500x " .. jagged, 1, true) ~= nil)
+  local poor = hunterWorld()
+  local nsp = loadAddon(poor)
+  clientLoaded(poor)
+  poor.playerLevel = 41
+  poor.money = 0
+  local cheap = ammo(poor, { minLevel = 40 })
+  sellAmmo(poor, 1, cheap, { name = "Jagged Arrow", price = 1000 })
+  nsp.fillAmmo()
+  check("empty purse buys nothing",
+    #poor.buys == 0
+    and poor.printed[#poor.printed]:find("not enough gold", 1, true) ~= nil)
+end
+
+-- 119. Extended-cost goods and empty shelves never qualify.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local token = ammo(w, { minLevel = 40 })
+  sellAmmo(w, 1, token, { name = "Token Arrow", hasExtendedCost = true })
+  local gone = ammo(w, { minLevel = 40 })
+  sellAmmo(w, 2, gone, { name = "Gone Arrow", numAvailable = 0 })
+  check("unsellable shelf skipped", #ns.scanMerchantAmmo() == 0)
+end
+
+-- 120. The button tracks the moment: setting, shelf, and tab.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local jagged = ammo(w, { minLevel = 40 })
+  sellAmmo(w, 1, jagged, { name = "Jagged Arrow", price = 1000 })
+  w.env.MerchantFrame.selectedTab = 1
+  w.frame.onEvent(nil, "MERCHANT_SHOW")
+  check("button shows on the goods tab", ns.ammoButton.shown == true)
+  w.env.MerchantFrame.selectedTab = 2
+  w.frame.onEvent(nil, "MERCHANT_UPDATE")
+  check("button hides on buyback", ns.ammoButton.shown == false)
+  w.env.MerchantFrame.selectedTab = 1
+  w.frame.onEvent(nil, "MERCHANT_UPDATE")
+  check("button returns on goods", ns.ammoButton.shown == true)
+  ns.opts().fillAmmo = false
+  w.frame.onEvent(nil, "MERCHANT_UPDATE")
+  check("setting hides the button", ns.ammoButton.shown == false)
+  ns.opts().fillAmmo = true
+  w.merchantAmmo = {}
+  w.merchantGoods = {}
+  w.frame.onEvent(nil, "MERCHANT_UPDATE")
+  check("button hides without ammo on the shelf", ns.ammoButton.shown == false)
+  sellAmmo(w, 1, jagged, { name = "Jagged Arrow", price = 1000 })
+  w.frame.onEvent(nil, "MERCHANT_UPDATE")
+  check("button returns with ammo to buy", ns.ammoButton.shown == true)
+  ns.ammoButton.scripts.OnEnter(ns.ammoButton)
+  check("tooltip names the pick", w.gametip.title == "Fill Ammo"
+    and w.gametip.lines[1] == "Fill with " .. jagged)
+  for slot = 1, 14 do putAmmo(w, 1, slot, jagged, 200) end
+  w.frame.onEvent(nil, "BAG_UPDATE") -- the fill lands: nothing left to do
+  check("button hides on a full quiver", ns.ammoButton.shown == false)
+end
+
+-- 121. /vv ammo fills from chat; a soul bag never counts as a quiver.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local jagged = ammo(w, { minLevel = 40 })
+  sellAmmo(w, 1, jagged, { name = "Jagged Arrow", price = 1000 })
+  -- Bag 2: a restricted soul bag full of shards beside the real quiver.
+  w.bagSizes[2] = 20
+  w.bagFamilies[2] = 8
+  w.bags[2] = {}
+  local shard = "item:shard1"
+  w.itemIDs[shard] = 9001
+  w.classIDs[shard] = 0
+  w.subclassIDs[shard] = 8
+  w.bags[2][1] = shard
+  w.stackCounts["2:1"] = 5
+  local bags = ns.ammoBags()
+  check("soul bag excluded", #bags == 1 and bags[1] == 1)
+  w.env.SlashCmdList.VOCVENDOR("ammo")
+  check("slash ammo fills", #w.buys == 14)
+  w.deferred[#w.deferred]()
+  check("slash confirm fills fourteen",
+    w.printed[#w.printed]:find("filled ammo: 14x " .. jagged, 1, true) ~= nil)
+end
+
+-- 122. Without the bag buttons, a restricted bag holding only ammo counts,
+-- and an empty restricted bag fills when nothing confirmed.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.env.CharacterBag0Slot = nil -- client without the bag buttons
+  local bags = ns.ammoBags()
+  check("empty restricted bag fills button-less", #bags == 1 and bags[1] == 1)
+  w.bagFamilies[2] = 8
+  w.bagSizes[2] = 20
+  w.bags[2] = {}
+  local bags2 = ns.ammoBags()
+  check("button-less empties all count", #bags2 == 2)
+end
+
+-- 123. The reserves vote: an empty ammo slot plus arrows in the quiver
+-- buys arrows, never bullets, with no family data at all.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local arrows = ammo(w, { sub = 2, minLevel = 40 })
+  for slot = 1, 3 do putAmmo(w, 1, slot, arrows, 200) end
+  local bullets = ammo(w, { sub = 3, minLevel = 40 })
+  sellAmmo(w, 1, arrows, { name = "Jagged Arrow", price = 1000 })
+  sellAmmo(w, 2, bullets, { name = "Jagged Bullet", price = 1000 })
+  local want = ns.wantAmmo()
+  check("reserves vote names the arrow subclass",
+    want.sub == 2 and want.family == 1)
+  local goods = ns.scanMerchantAmmo()
+  check("vote excludes bullets", #goods == 1 and goods[1].link == arrows)
+  ns.fillAmmo()
+  check("vote fills arrows", #w.buys == 11 and w.buys[1].index == 1)
+  w.deferred[#w.deferred]()
+  check("vote confirm counts arrows",
+    w.printed[#w.printed]:find("filled ammo: 11x " .. arrows, 1, true) ~= nil)
+end
+
+-- 124. The family match: an empty slot and an empty quiver still pick the
+-- ammo that fits the quiver, by family numbers alone.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local arrows = ammo(w, { sub = 2, minLevel = 40 })
+  local bullets = ammo(w, { sub = 3, minLevel = 40 })
+  w.itemFamilies[arrows] = 1 -- the quiver's family
+  w.itemFamilies[bullets] = 2 -- some other pouch's family
+  sellAmmo(w, 1, arrows, { name = "Jagged Arrow", price = 1000 })
+  sellAmmo(w, 2, bullets, { name = "Jagged Bullet", price = 1000 })
+  local want = ns.wantAmmo()
+  check("empty quiver wants its family",
+    want.sub == nil and want.family == 1)
+  local goods = ns.scanMerchantAmmo()
+  check("family excludes bullets", #goods == 1 and goods[1].link == arrows)
+  -- The ID fallback: a family keyed by item ID resolves the same way.
+  w.itemFamilies[arrows] = nil
+  w.itemFamilies[w.itemIDs[arrows]] = 1
+  check("family resolves by item ID", ns.ammoFamily(arrows) == 1)
+end
+
+-- 125. A bullet pouch's empty slots never inflate an arrow order: a full
+-- quiver plus an empty 20-slot pouch buys nothing.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  local arrows = ammo(w, { sub = 2, minLevel = 40 })
+  for slot = 1, 14 do putAmmo(w, 1, slot, arrows, 200) end
+  w.bagSizes[2] = 20
+  w.bagFamilies[2] = 2
+  w.bags[2] = {}
+  w.itemFamilies[arrows] = 1
+  sellAmmo(w, 1, arrows, { name = "Jagged Arrow", price = 1000 })
+  ns.fillAmmo()
+  check("wrong-family empties buy nothing",
+    #w.buys == 0
+    and w.printed[#w.printed]:find("no room for", 1, true) ~= nil)
+end
+
+-- 126. An empty pouch beside a confirmed quiver stays out of the bags, and
+-- unknown ammo families stay eligible: the quiver still resolves its
+-- family, both types scan, and only the quiver's own slots fill.
+do
+  local w = hunterWorld()
+  local ns = loadAddon(w)
+  clientLoaded(w)
+  w.playerLevel = 41
+  w.bagSizes[2] = 20
+  w.bagFamilies[2] = 2
+  w.bags[2] = {}
+  local arrows = ammo(w, { sub = 2, minLevel = 40 })
+  local bullets = ammo(w, { sub = 3, minLevel = 40 })
+  sellAmmo(w, 1, arrows, { name = "Jagged Arrow", price = 1000 })
+  sellAmmo(w, 2, bullets, { name = "Jagged Bullet", price = 1000 })
+  local want = ns.wantAmmo()
+  check("quiver resolves its family",
+    want.sub == nil and want.family == 1)
+  check("unknown families stay eligible", #ns.scanMerchantAmmo() == 2)
+  ns.fillAmmo()
+  check("pouch empties stay out of an arrow order", #w.buys == 14)
+  w.deferred[#w.deferred]()
+  check("mixed confirm names the winner",
+    w.printed[#w.printed]:find("filled ammo: 14x " .. arrows, 1, true) ~= nil)
 end
 
 print("ok - " .. passed .. " checks passed")
